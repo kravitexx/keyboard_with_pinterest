@@ -186,7 +186,6 @@ class PinterestDrawerView @JvmOverloads constructor(
         val settings = webView.settings
         settings.javaScriptEnabled = true
         settings.domStorageEnabled = true
-        settings.databaseEnabled = true
         settings.loadsImagesAutomatically = true
         settings.useWideViewPort = true
         settings.loadWithOverviewMode = true
@@ -218,7 +217,7 @@ class PinterestDrawerView @JvmOverloads constructor(
         }
 
         webView.webViewClient = object : WebViewClient() {
-            @Suppress("DEPRECATION")
+            @Deprecated("Deprecated in Java")
             override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean {
                 return handleUrlLoading(url)
             }

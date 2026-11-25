@@ -12,3 +12,8 @@
 # after upgrading to gradle 8, stack traces contain "unknown source"
 -keepattributes SourceFile,LineNumberTable
 -dontobfuscate
+
+# Keep WebView JavascriptInterface methods used by Mini Pinterest drawer
+-keepclassmembers class * {
+    @android.webkit.JavascriptInterface <methods>;
+}
