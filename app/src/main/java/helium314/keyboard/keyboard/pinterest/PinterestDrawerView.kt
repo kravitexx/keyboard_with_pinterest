@@ -687,6 +687,9 @@ class PinterestDrawerView @JvmOverloads constructor(
                 document.addEventListener('focusin', function(e) {
                     if (isTextEditable(e.target)) {
                         window.PinterestBridge.onWebInputFocused(true, e.target.type || 'text');
+                        setTimeout(function() {
+                            try { e.target.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (err) {}
+                        }, 200);
                     }
                 }, true);
 
@@ -701,6 +704,7 @@ class PinterestDrawerView @JvmOverloads constructor(
                 window.__pinInsertText = function(text) {
                     var el = document.activeElement;
                     if (!el || !isTextEditable(el)) return false;
+                    try { el.scrollIntoView({ block: 'nearest' }); } catch (err) {}
                     if (el.isContentEditable) {
                         document.execCommand('insertText', false, text);
                         return true;
