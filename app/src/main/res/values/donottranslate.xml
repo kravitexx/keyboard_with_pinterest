@@ -74,4 +74,16 @@
     <!-- App slogan-->
     <string name="app_slogan" translatable="false">100% FOSS keyboard, based on AOSP.</string>
 
+    <!-- Mini Pinterest drawer strings -->
+    <string name="pinterest_back" translatable="false">Back</string>
+    <string name="pinterest_home" translatable="false">Pinterest Home</string>
+    <string name="pinterest_send_pin" translatable="false">Send Current Pin</string>
+    <string name="pinterest_toggle_height" translatable="false">Toggle Drawer Height</string>
+    <string name="pinterest_close" translatable="false">Close Pinterest</string>
+    <string name="pinterest_typing_hint" translatable="false">Typing into Pinterest</string>
+    <string name="pinterest_hide_keyboard" translatable="false">Hide Keyboard</string>
+    <string name="sending_pin" translatable="false">Sending Pin…</string>
+    <string name="pinterest_no_media_found" translatable="false">No Pin image or video found on this page</string>
+    <string name="pinterest_send_failed" translatable="false">Could not send Pin media</string>
+
 </resources>

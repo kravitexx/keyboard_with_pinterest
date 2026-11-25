@@ -35,6 +35,7 @@ class KeyboardState(private val switchActions: SwitchActions) {
         fun setAlphabetKeyboard(shiftMode: ShiftMode)
         fun setEmojiKeyboard()
         fun setClipboardKeyboard()
+        fun setPinterestDrawer()
         fun setNumpadKeyboard()
         fun setDpadKeyboard()
         fun setSymbolsKeyboard()
@@ -170,6 +171,7 @@ class KeyboardState(private val switchActions: SwitchActions) {
             Utility.SYMBOLS_SHIFTED -> switchActions.setSymbolsShiftedKeyboard()
             Utility.EMOJI -> switchActions.setEmojiKeyboard()
             Utility.CLIPBOARD -> switchActions.setClipboardKeyboard()
+            Utility.PINTEREST -> switchActions.setPinterestDrawer()
             Utility.NUMPAD -> switchActions.setNumpadKeyboard()
             Utility.DPAD -> switchActions.setDpadKeyboard()
         }
@@ -474,6 +476,7 @@ class KeyboardState(private val switchActions: SwitchActions) {
             KeyCode.CLIPBOARD -> if (Settings.getValues().mClipboardHistoryEnabled) {
                 toggleLayout(Utility.CLIPBOARD, autoCapsFlags, recapitalizeMode)
             }
+            KeyCode.PINTEREST -> toggleLayout(Utility.PINTEREST, autoCapsFlags, recapitalizeMode)
             KeyCode.NUMPAD -> toggleLayout(Utility.NUMPAD, autoCapsFlags, recapitalizeMode)
             KeyCode.DPAD -> toggleLayout(Utility.DPAD, autoCapsFlags, recapitalizeMode)
             KeyCode.SYMBOL -> toggleLayout(Utility.SYMBOLS, autoCapsFlags, recapitalizeMode)
@@ -503,6 +506,7 @@ class KeyboardState(private val switchActions: SwitchActions) {
         SYMBOLS_SHIFTED,
         EMOJI,
         CLIPBOARD,
+        PINTEREST,
         NUMPAD,
         DPAD,
     ;
@@ -513,6 +517,7 @@ class KeyboardState(private val switchActions: SwitchActions) {
                 SYMBOLS_SHIFTED -> Utility.SYMBOLS_SHIFTED
                 EMOJI -> Utility.EMOJI
                 CLIPBOARD -> Utility.CLIPBOARD
+                PINTEREST -> Utility.PINTEREST
                 NUMPAD -> Utility.NUMPAD
                 DPAD -> Utility.DPAD
             }

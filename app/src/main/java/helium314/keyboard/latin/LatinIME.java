@@ -1113,8 +1113,8 @@ public class LatinIME extends InputMethodService implements
 
     @Override
     public boolean onEvaluateFullscreenMode() {
-        if (isImeSuppressedByHardwareKeyboard() || mSettings.getCurrent().mIsFloatingKeyboard) {
-            // If there is a hardware keyboard or we're floating, disable full screen mode.
+        if (isImeSuppressedByHardwareKeyboard() || mSettings.getCurrent().mIsFloatingKeyboard || mKeyboardSwitcher.isShowingPinterestDrawer()) {
+            // If there is a hardware keyboard, floating mode, or Pinterest drawer is open, disable full screen mode.
             return false;
         }
         // Reread resource value here, because this method is called by the framework as needed.
@@ -1497,6 +1497,11 @@ public class LatinIME extends InputMethodService implements
     // Hooks for hardware keyboard
     @Override
     public boolean onKeyDown(final int keyCode, final KeyEvent keyEvent) {
+        if (keyCode == KeyEvent.KEYCODE_BACK && mKeyboardSwitcher.isShowingPinterestDrawer()) {
+            if (mKeyboardSwitcher.handlePinterestBackPressed()) {
+                return true;
+            }
+        }
         if (mKeyboardActionListener.onKeyDown(keyCode, keyEvent))
             return true;
         return super.onKeyDown(keyCode, keyEvent);

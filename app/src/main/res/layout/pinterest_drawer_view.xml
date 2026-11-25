@@ -1,0 +1,155 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    SPDX-License-Identifier: GPL-3.0-only
+-->
+<helium314.keyboard.keyboard.pinterest.PinterestDrawerView
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:layout_gravity="bottom"
+    android:orientation="vertical"
+    android:visibility="gone">
+
+    <!-- Slim top control bar -->
+    <LinearLayout
+        android:id="@+id/pinterest_control_bar"
+        android:layout_width="match_parent"
+        android:layout_height="@dimen/config_suggestions_strip_height"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <ImageButton
+            android:id="@+id/pinterest_btn_back"
+            style="?attr/suggestionWordStyle"
+            android:layout_width="40dp"
+            android:layout_height="match_parent"
+            android:contentDescription="@string/pinterest_back"
+            android:scaleType="center"
+            android:src="@drawable/ic_arrow_back" />
+
+        <ImageButton
+            android:id="@+id/pinterest_btn_home"
+            style="?attr/suggestionWordStyle"
+            android:layout_width="40dp"
+            android:layout_height="match_parent"
+            android:contentDescription="@string/pinterest_home"
+            android:scaleType="center"
+            android:src="@drawable/ic_pinterest_home" />
+
+        <TextView
+            android:id="@+id/pinterest_title"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:ellipsize="end"
+            android:gravity="center_vertical"
+            android:paddingHorizontal="6dp"
+            android:singleLine="true"
+            android:text="@string/pinterest"
+            android:textSize="13sp"
+            tools:ignore="HardcodedText" />
+
+        <ImageButton
+            android:id="@+id/pinterest_btn_send"
+            style="?attr/suggestionWordStyle"
+            android:layout_width="40dp"
+            android:layout_height="match_parent"
+            android:contentDescription="@string/pinterest_send_pin"
+            android:scaleType="center"
+            android:src="@drawable/sym_keyboard_send_lxx" />
+
+        <ImageButton
+            android:id="@+id/pinterest_btn_height"
+            style="?attr/suggestionWordStyle"
+            android:layout_width="40dp"
+            android:layout_height="match_parent"
+            android:contentDescription="@string/pinterest_toggle_height"
+            android:scaleType="center"
+            android:src="@drawable/ic_pinterest_expand" />
+
+        <ImageButton
+            android:id="@+id/pinterest_btn_close"
+            style="?attr/suggestionWordStyle"
+            android:layout_width="40dp"
+            android:layout_height="match_parent"
+            android:contentDescription="@string/pinterest_close"
+            android:scaleType="center"
+            android:src="@drawable/ic_close" />
+    </LinearLayout>
+
+    <ProgressBar
+        android:id="@+id/pinterest_progress"
+        style="?android:attr/progressBarStyleHorizontal"
+        android:layout_width="match_parent"
+        android:layout_height="2dp"
+        android:indeterminate="false"
+        android:max="100"
+        android:visibility="gone" />
+
+    <FrameLayout
+        android:id="@+id/pinterest_webview_container"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1">
+
+        <WebView
+            android:id="@+id/pinterest_webview"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:focusable="true"
+            android:focusableInTouchMode="true" />
+    </FrameLayout>
+
+    <!-- Collapsible in-drawer soft keyboard for typing into WebView login/search inputs -->
+    <LinearLayout
+        android:id="@+id/pinterest_ime_container"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:visibility="gone">
+
+        <LinearLayout
+            android:id="@+id/pinterest_ime_bar"
+            android:layout_width="match_parent"
+            android:layout_height="28dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingHorizontal="8dp">
+
+            <TextView
+                android:id="@+id/pinterest_ime_label"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:singleLine="true"
+                android:text="@string/pinterest_typing_hint"
+                android:textSize="11sp" />
+
+            <ImageButton
+                android:id="@+id/pinterest_ime_paste"
+                style="?attr/suggestionWordStyle"
+                android:layout_width="36dp"
+                android:layout_height="match_parent"
+                android:contentDescription="@string/paste"
+                android:scaleType="center"
+                android:src="@drawable/sym_keyboard_paste" />
+
+            <ImageButton
+                android:id="@+id/pinterest_ime_hide"
+                style="?attr/suggestionWordStyle"
+                android:layout_width="36dp"
+                android:layout_height="match_parent"
+                android:contentDescription="@string/pinterest_hide_keyboard"
+                android:scaleType="center"
+                android:src="@drawable/ic_keyboard_hide" />
+        </LinearLayout>
+
+        <helium314.keyboard.keyboard.MainKeyboardView
+            android:id="@+id/pinterest_mini_keyboard"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layoutDirection="ltr" />
+    </LinearLayout>
+
+</helium314.keyboard.keyboard.pinterest.PinterestDrawerView>

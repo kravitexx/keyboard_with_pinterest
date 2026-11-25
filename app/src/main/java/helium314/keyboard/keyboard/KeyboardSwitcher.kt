@@ -28,6 +28,7 @@ import helium314.keyboard.keyboard.KeyboardLayoutSet.Companion.KeyboardLayoutSet
 import helium314.keyboard.keyboard.KeyboardTheme.Companion.getKeyboardTheme
 import helium314.keyboard.keyboard.clipboard.ClipboardHistoryView
 import helium314.keyboard.keyboard.emoji.EmojiPalettesView
+import helium314.keyboard.keyboard.pinterest.PinterestDrawerView
 import helium314.keyboard.keyboard.internal.KeyboardState
 import helium314.keyboard.keyboard.internal.LayoutDirective
 import helium314.keyboard.keyboard.internal.ShiftMode
@@ -83,6 +84,13 @@ class KeyboardSwitcher private constructor() {
         return view
     }
     private var emojiPalettes: EmojiPalettesView? = null
+    private val InputViewBinding.pinterestDrawerView: PinterestDrawerView get() {
+        pinterestDrawer?.let { return it }
+        val view = mainKeyboardFrame.pinterestDrawer.inflate() as PinterestDrawerView
+        pinterestDrawer = view
+        return view
+    }
+    private var pinterestDrawer: PinterestDrawerView? = null
 
     // created on init, i.e. only available when set as active input method
     private lateinit var latinIME: LatinIME
@@ -103,10 +111,12 @@ class KeyboardSwitcher private constructor() {
     val clipboardStrip get() = inputView?.mainKeyboardFrame?.stripContainer?.clipboardStrip
     val isShowingEmojiPalettes get() = emojiPalettes?.isShown == true
     val isShowingClipboardHistory get() = clipboardHistory?.isShown == true
-    val isShowingPopupKeysPanel get () = !isShowingEmojiPalettes && !isShowingClipboardHistory && mainKeyboardView?.isShowingPopupKeysPanel == true
+    val isShowingPinterestDrawer get() = pinterestDrawer?.isShown == true
+    val isShowingPopupKeysPanel get () = !isShowingEmojiPalettes && !isShowingClipboardHistory && !isShowingPinterestDrawer && mainKeyboardView?.isShowingPopupKeysPanel == true
     val visibleKeyboardView get() = when {
         isShowingEmojiPalettes -> inputView?.emojiPalettesView
         isShowingClipboardHistory -> inputView?.clipboardHistoryView
+        isShowingPinterestDrawer -> inputView?.pinterestDrawerView
         else -> mainKeyboardView
     }
     val keyboardCapsMode get() = keyboard?.mId?.element?.capsMode ?: CapsMode.OFF
@@ -114,6 +124,7 @@ class KeyboardSwitcher private constructor() {
     val keyboardSwitchState: KeyboardSwitchState get() = when {
         isShowingEmojiPalettes -> KeyboardSwitchState.EMOJI
         isShowingClipboardHistory -> KeyboardSwitchState.CLIPBOARD
+        isShowingPinterestDrawer -> KeyboardSwitchState.PINTEREST
         (keyboardLayoutSet == null || inputView?.keyboardView?.isShown != true) && stripContainer?.isShown != true -> KeyboardSwitchState.HIDDEN
         isShowingKeyboardId(KeyboardElement.SYMBOLS_SHIFTED) -> KeyboardSwitchState.SYMBOLS_SHIFTED
         else -> KeyboardSwitchState.OTHER
@@ -141,6 +152,8 @@ class KeyboardSwitcher private constructor() {
         this.inputView = inputView
         emojiPalettes = null
         clipboardHistory = null
+        pinterestDrawer?.destroyPinterestDrawer()
+        pinterestDrawer = null
         inputView.wrapperView.keyboardActionListener = latinIME.mKeyboardActionListener
         inputView.keyboardView.setHardwareAcceleratedDrawingEnabled(isHardwareAcceleratedDrawingEnabled)
         inputView.keyboardView.setKeyboardActionListener(latinIME.mKeyboardActionListener)
@@ -292,6 +305,7 @@ class KeyboardSwitcher private constructor() {
 
     fun onHideWindow() {
         inputView?.keyboardView?.onHideWindow()
+        pinterestDrawer?.onHideWindow()
     }
 
     fun onWindowShown() {
@@ -316,6 +330,8 @@ class KeyboardSwitcher private constructor() {
         inputView.suggestionStripView.isVisible = latinIME.hasSuggestionStripView()
         clipboardHistory?.isGone = true
         clipboardHistory?.stopClipboardHistory()
+        pinterestDrawer?.isGone = true
+        pinterestDrawer?.stopPinterestDrawer()
     }
 
     fun onToggleKeyboard(toggleState: KeyboardSwitchState) {
@@ -333,12 +349,17 @@ class KeyboardSwitcher private constructor() {
                 setEmojiKeyboard()
             } else if (toggleState == KeyboardSwitchState.CLIPBOARD) {
                 setClipboardKeyboard()
+            } else if (toggleState == KeyboardSwitchState.PINTEREST) {
+                setPinterestDrawer()
             } else {
                 emojiPalettes?.stopEmojiPalettes()
                 emojiPalettes?.isGone = true
 
                 clipboardHistory?.stopClipboardHistory()
                 clipboardHistory?.isGone = true
+
+                pinterestDrawer?.stopPinterestDrawer()
+                pinterestDrawer?.isGone = true
 
                 inputView?.keyboardFrame?.isGone = false
                 inputView?.keyboardView?.isGone = false
@@ -385,6 +406,7 @@ class KeyboardSwitcher private constructor() {
         // Reload the entire keyboard, and switch to the previous layout
         val wasEmoji = isShowingEmojiPalettes
         val wasClipboard = isShowingClipboardHistory
+        val wasPinterest = isShowingPinterestDrawer
         loadKeyboard(
             latinIME.currentInputEditorInfo, Settings.getValues(),
             latinIME.currentAutoCapsState, latinIME.currentRecapitalizeState, null
@@ -393,6 +415,8 @@ class KeyboardSwitcher private constructor() {
             setEmojiKeyboard()
         } else if (wasClipboard) {
             setClipboardKeyboard()
+        } else if (wasPinterest) {
+            setPinterestDrawer()
         }
     }
 
@@ -474,6 +498,8 @@ class KeyboardSwitcher private constructor() {
         inputView.keyboardView.deallocateMemory()
         emojiPalettes?.stopEmojiPalettes()
         clipboardHistory?.stopClipboardHistory()
+        pinterestDrawer?.destroyPinterestDrawer()
+        pinterestDrawer = null
     }
 
     fun trimMemory() {
@@ -502,6 +528,16 @@ class KeyboardSwitcher private constructor() {
 
     fun setClipboardKeyboard() = state.setLayout(LayoutDirective.Utility.CLIPBOARD)
 
+    fun setPinterestDrawer() = state.setLayout(LayoutDirective.Utility.PINTEREST)
+
+    fun closePinterestDrawer() {
+        if (isShowingPinterestDrawer) {
+            resetKeyboardStateToAlphabet()
+        }
+    }
+
+    fun handlePinterestBackPressed(): Boolean = pinterestDrawer?.handleBackPressed() == true
+
     fun toggleLayout(layout: LayoutDirective.Utility, autoCapsFlags: Int, recapitalizeMode: RecapitalizeMode?) =
         state.toggleLayout(layout, autoCapsFlags, recapitalizeMode)
 
@@ -520,7 +556,7 @@ class KeyboardSwitcher private constructor() {
     }
 
     fun saveKeyboardState() {
-        if (keyboard != null || isShowingEmojiPalettes || isShowingClipboardHistory) {
+        if (keyboard != null || isShowingEmojiPalettes || isShowingClipboardHistory || isShowingPinterestDrawer) {
             state.onSaveKeyboardState()
         }
     }
@@ -568,6 +604,8 @@ class KeyboardSwitcher private constructor() {
             inputView.clipboardStripScrollView.isGone = true
             inputView.emojiTabStrip.isGone = false
             clipboardHistory?.isGone = true
+            pinterestDrawer?.isGone = true
+            pinterestDrawer?.stopPinterestDrawer()
             inputView.emojiPalettesView.startEmojiPalettes(
                 inputView.keyboardView.keyVisualAttribute,
                 latinIME.currentInputEditorInfo, latinIME.mKeyboardActionListener
@@ -589,11 +627,33 @@ class KeyboardSwitcher private constructor() {
             inputView.clipboardStripScrollView.post { inputView.clipboardStripScrollView.fullScroll(HorizontalScrollView.FOCUS_RIGHT) }
             inputView.clipboardStripScrollView.isGone = false
             emojiPalettes?.isGone = true
+            pinterestDrawer?.isGone = true
+            pinterestDrawer?.stopPinterestDrawer()
             inputView.clipboardHistoryView.startClipboardHistory(
                 latinIME.clipboardHistoryManager, inputView.keyboardView.keyVisualAttribute,
                 latinIME.currentInputEditorInfo, latinIME.mKeyboardActionListener
             )
             inputView.clipboardHistoryView.isGone = false
+        }
+
+        override fun setPinterestDrawer() {
+            val inputView = inputView ?: return
+            if (KeyboardState.SwitchActions.DEBUG_ACTION) {
+                Log.d(TAG, "setPinterestDrawer")
+            }
+            inputView.wrapperView.isGone = false
+            inputView.keyboardFrame.isGone = false
+            inputView.keyboardView.isGone = true
+            inputView.emojiTabStrip.isGone = true
+            inputView.clipboardStripScrollView.isGone = true
+            inputView.suggestionStripView.isGone = true
+            inputView.stripContainer.isGone = true
+            emojiPalettes?.isGone = true
+            emojiPalettes?.stopEmojiPalettes()
+            clipboardHistory?.isGone = true
+            clipboardHistory?.stopClipboardHistory()
+            inputView.pinterestDrawerView.startPinterestDrawer(latinIME)
+            inputView.pinterestDrawerView.isGone = false
         }
 
         override fun setNumpadKeyboard() {
@@ -684,6 +744,7 @@ class KeyboardSwitcher private constructor() {
         SYMBOLS_SHIFTED(KeyboardElement.SYMBOLS_SHIFTED),
         EMOJI(KeyboardElement.EMOJI_RECENTS),
         CLIPBOARD(KeyboardElement.CLIPBOARD),
+        PINTEREST(null),
         OTHER(null)
     }
 
