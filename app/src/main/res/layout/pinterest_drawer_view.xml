@@ -127,6 +127,15 @@
                 android:textSize="11sp" />
 
             <ImageButton
+                android:id="@+id/pinterest_ime_account"
+                style="?attr/suggestionWordStyle"
+                android:layout_width="36dp"
+                android:layout_height="match_parent"
+                android:contentDescription="@string/pinterest_pick_google_account"
+                android:scaleType="center"
+                android:src="@drawable/ic_pinterest_account" />
+
+            <ImageButton
                 android:id="@+id/pinterest_ime_paste"
                 style="?attr/suggestionWordStyle"
                 android:layout_width="36dp"

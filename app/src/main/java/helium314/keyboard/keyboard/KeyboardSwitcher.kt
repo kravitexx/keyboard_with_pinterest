@@ -86,7 +86,12 @@ class KeyboardSwitcher private constructor() {
     private var emojiPalettes: EmojiPalettesView? = null
     private val InputViewBinding.pinterestDrawerView: PinterestDrawerView get() {
         pinterestDrawer?.let { return it }
-        val view = mainKeyboardFrame.pinterestDrawer.inflate() as PinterestDrawerView
+        val stub = mainKeyboardFrame.pinterestDrawer
+        val view = if (stub.parent != null) {
+            stub.inflate() as PinterestDrawerView
+        } else {
+            mainKeyboardFrame.root.findViewById(R.id.pinterest_drawer_inflated)
+        }
         pinterestDrawer = view
         return view
     }
@@ -111,7 +116,7 @@ class KeyboardSwitcher private constructor() {
     val clipboardStrip get() = inputView?.mainKeyboardFrame?.stripContainer?.clipboardStrip
     val isShowingEmojiPalettes get() = emojiPalettes?.isShown == true
     val isShowingClipboardHistory get() = clipboardHistory?.isShown == true
-    val isShowingPinterestDrawer get() = pinterestDrawer?.isShown == true
+    val isShowingPinterestDrawer get() = pinterestDrawer?.isVisible == true
     val isShowingPopupKeysPanel get () = !isShowingEmojiPalettes && !isShowingClipboardHistory && !isShowingPinterestDrawer && mainKeyboardView?.isShowingPopupKeysPanel == true
     val visibleKeyboardView get() = when {
         isShowingEmojiPalettes -> inputView?.emojiPalettesView
@@ -406,7 +411,6 @@ class KeyboardSwitcher private constructor() {
         // Reload the entire keyboard, and switch to the previous layout
         val wasEmoji = isShowingEmojiPalettes
         val wasClipboard = isShowingClipboardHistory
-        val wasPinterest = isShowingPinterestDrawer
         loadKeyboard(
             latinIME.currentInputEditorInfo, Settings.getValues(),
             latinIME.currentAutoCapsState, latinIME.currentRecapitalizeState, null
@@ -415,8 +419,6 @@ class KeyboardSwitcher private constructor() {
             setEmojiKeyboard()
         } else if (wasClipboard) {
             setClipboardKeyboard()
-        } else if (wasPinterest) {
-            setPinterestDrawer()
         }
     }
 
@@ -498,8 +500,7 @@ class KeyboardSwitcher private constructor() {
         inputView.keyboardView.deallocateMemory()
         emojiPalettes?.stopEmojiPalettes()
         clipboardHistory?.stopClipboardHistory()
-        pinterestDrawer?.destroyPinterestDrawer()
-        pinterestDrawer = null
+        pinterestDrawer?.stopPinterestDrawer()
     }
 
     fun trimMemory() {
@@ -531,8 +532,16 @@ class KeyboardSwitcher private constructor() {
     fun setPinterestDrawer() = state.setLayout(LayoutDirective.Utility.PINTEREST)
 
     fun closePinterestDrawer() {
-        if (isShowingPinterestDrawer) {
+        pinterestDrawer?.stopPinterestDrawer()
+        pinterestDrawer?.isGone = true
+        if (keyboardSwitchState == KeyboardSwitchState.PINTEREST) {
             resetKeyboardStateToAlphabet()
+        }
+        mainKeyboardView?.let {
+            PointerTracker.cancelAllPointerTrackers()
+            PointerTracker.switchTo(it)
+            it.setKeyboardActionListener(latinIME.mKeyboardActionListener)
+            it.keyboard?.let { kb -> it.setKeyboard(kb) }
         }
     }
 
@@ -556,7 +565,7 @@ class KeyboardSwitcher private constructor() {
     }
 
     fun saveKeyboardState() {
-        if (keyboard != null || isShowingEmojiPalettes || isShowingClipboardHistory || isShowingPinterestDrawer) {
+        if (keyboard != null || isShowingEmojiPalettes || isShowingClipboardHistory) {
             state.onSaveKeyboardState()
         }
     }
@@ -719,6 +728,8 @@ class KeyboardSwitcher private constructor() {
             // Make {@link MainKeyboardView} visible and hide {@link EmojiPalettesView}.
             val currentSettingsValues = Settings.getValues()
             setMainKeyboardFrame(currentSettingsValues, toggleState)
+            PointerTracker.switchTo(inputView.keyboardView)
+            inputView.keyboardView.setKeyboardActionListener(latinIME.mKeyboardActionListener)
             // TODO: pass this object to setKeyboard instead of getting the current values.
             val oldKeyboard = inputView.keyboardView.keyboard
             val newKeyboard = keyboardLayoutSet!!.getKeyboard(keyboardElement)

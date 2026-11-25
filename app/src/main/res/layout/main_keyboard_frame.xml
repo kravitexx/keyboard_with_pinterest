@@ -39,6 +39,7 @@
             android:layout="@layout/clipboard_history_view" />
         <ViewStub
             android:id="@+id/pinterest_drawer"
+            android:inflatedId="@+id/pinterest_drawer_inflated"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout="@layout/pinterest_drawer_view" />

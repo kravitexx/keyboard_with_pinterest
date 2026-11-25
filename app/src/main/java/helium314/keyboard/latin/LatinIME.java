@@ -45,6 +45,7 @@ import helium314.keyboard.keyboard.KeyboardId;
 import helium314.keyboard.keyboard.KeyboardLayoutSet;
 import helium314.keyboard.keyboard.KeyboardSwitcher;
 import helium314.keyboard.keyboard.MainKeyboardView;
+import helium314.keyboard.keyboard.pinterest.PinterestAuthSession;
 import helium314.keyboard.latin.common.ColorType;
 import helium314.keyboard.latin.common.Constants;
 import helium314.keyboard.latin.common.InputPointers;
@@ -896,6 +897,9 @@ public class LatinIME extends InputMethodService implements
             // Space state must be updated before calling updateShiftState
             mKeyboardSwitcher.updateShiftState(getCurrentAutoCapsState(), getCurrentRecapitalizeState());
         }
+        if (PinterestAuthSession.INSTANCE.consumeReopenForPackage(editorInfo.packageName)) {
+            mKeyboardSwitcher.setPinterestDrawer();
+        }
         // Set neutral suggestions and show the toolbar if the "Auto show toolbar" setting is enabled.
         if (!mHandler.hasPendingResumeSuggestions()) {
             mHandler.cancelUpdateSuggestionStrip();
@@ -930,6 +934,7 @@ public class LatinIME extends InputMethodService implements
     public void onWindowHidden() {
         super.onWindowHidden();
         Log.i(TAG, "onWindowHidden");
+        mKeyboardSwitcher.closePinterestDrawer();
         closeMainKeyboard();
         clearNavigationBarColor();
     }
@@ -939,6 +944,7 @@ public class LatinIME extends InputMethodService implements
         Log.i(TAG, "onFinishInput");
 
         mDictionaryFacilitator.onFinishInput();
+        mKeyboardSwitcher.closePinterestDrawer();
         closeMainKeyboard();
     }
 
