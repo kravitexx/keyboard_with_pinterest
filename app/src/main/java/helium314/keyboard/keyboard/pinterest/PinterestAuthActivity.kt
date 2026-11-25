@@ -4,6 +4,7 @@ package helium314.keyboard.keyboard.pinterest
 import android.accounts.AccountManager
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.content.ClipboardManager
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
@@ -23,6 +24,7 @@ import android.widget.Button
 import android.widget.ImageButton
 import android.widget.ProgressBar
 import android.widget.TextView
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
@@ -93,6 +95,9 @@ class PinterestAuthActivity : ComponentActivity() {
 
         findViewById<ImageButton>(R.id.pinterest_auth_close).setOnClickListener {
             finishAuth(completed = false)
+        }
+        findViewById<ImageButton>(R.id.pinterest_auth_paste).setOnClickListener {
+            pasteClipboardIntoAuthWebView()
         }
         findViewById<Button>(R.id.pinterest_auth_pick_account).setOnClickListener {
             launchAndroidAccountPicker()
@@ -294,6 +299,51 @@ class PinterestAuthActivity : ComponentActivity() {
         )
     }
 
+    private fun pasteClipboardIntoAuthWebView() {
+        if (!::webView.isInitialized) return
+        val cm = getSystemService(CLIPBOARD_SERVICE) as? ClipboardManager ?: return
+        val text = cm.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(this)?.toString()
+        if (text.isNullOrEmpty()) {
+            Toast.makeText(this, R.string.pinterest_clipboard_empty, Toast.LENGTH_SHORT).show()
+            return
+        }
+        val quoted = JSONObject.quote(text)
+        webView.evaluateJavascript(
+            """
+            (function(val) {
+                function isVisibleInput(el) {
+                    if (!el) return false;
+                    if (el.tagName !== 'INPUT' && el.tagName !== 'TEXTAREA' && !el.isContentEditable) return false;
+                    return !el.readOnly && !el.disabled && el.offsetParent !== null;
+                }
+                var el = document.activeElement;
+                if (!isVisibleInput(el)) {
+                    var list = document.querySelectorAll('input[type="password"], input#identifierId, input[type="email"], input[type="text"], input');
+                    for (var i = 0; i < list.length; i++) {
+                        if (isVisibleInput(list[i])) { el = list[i]; break; }
+                    }
+                }
+                if (!el) return;
+                el.focus();
+                if (el.isContentEditable) {
+                    document.execCommand('insertText', false, val);
+                    return;
+                }
+                var proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+                var desc = Object.getOwnPropertyDescriptor(proto, 'value');
+                var start = el.selectionStart != null ? el.selectionStart : el.value.length;
+                var end = el.selectionEnd != null ? el.selectionEnd : el.value.length;
+                var next = el.value.slice(0, start) + val + el.value.slice(end);
+                if (desc && desc.set) desc.set.call(el, next); else el.value = next;
+                try { el.setSelectionRange(start + val.length, start + val.length); } catch (e) {}
+                el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, data: val, inputType: 'insertText' }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+            })($quoted);
+            """.trimIndent(),
+            null
+        )
+    }
+
     private fun finishAuth(completed: Boolean) {
         runCatching { CookieManager.getInstance().flush() }
         if (completed) {
@@ -303,7 +353,24 @@ class PinterestAuthActivity : ComponentActivity() {
         finish()
     }
 
+    override fun onStart() {
+        super.onStart()
+        if (!pickerOnlyMode) {
+            PinterestAuthSession.isAuthActivityVisible = true
+        }
+    }
+
+    override fun onStop() {
+        if (!pickerOnlyMode) {
+            PinterestAuthSession.isAuthActivityVisible = false
+        }
+        super.onStop()
+    }
+
     override fun onDestroy() {
+        if (!pickerOnlyMode) {
+            PinterestAuthSession.isAuthActivityVisible = false
+        }
         runCatching {
             CookieManager.getInstance().flush()
             if (::webView.isInitialized) {
@@ -347,6 +414,8 @@ object PinterestAuthSession {
     var lastSelectedEmail: String? = null
     var pendingFillEmail: String? = null
     var pendingReloadHome: Boolean = false
+    @Volatile
+    var isAuthActivityVisible: Boolean = false
 
     private var reopenTargetPackage: String? = null
     private var reopenRequestedAtMs: Long = 0L

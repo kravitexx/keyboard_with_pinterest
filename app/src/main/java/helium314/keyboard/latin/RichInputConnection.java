@@ -13,11 +13,13 @@ import android.inputmethodservice.InputMethodService;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.SystemClock;
+import android.text.InputType;
 import android.text.SpannableStringBuilder;
 import android.text.TextUtils;
 import android.text.style.CharacterStyle;
 
 import helium314.keyboard.keyboard.KeyboardSwitcher;
+import helium314.keyboard.keyboard.pinterest.PinterestAuthSession;
 import helium314.keyboard.latin.common.ConstantsKt;
 import helium314.keyboard.latin.define.DebugFlags;
 import helium314.keyboard.latin.settings.Settings;
@@ -146,11 +148,34 @@ public final class RichInputConnection implements PrivateCommandPerformer {
     }
 
     /**
+     * In-process WebView editors (like PinterestAuthActivity) run Chromium's ThreadedInputConnection
+     * on the same main Looper as LatinIME. Blocking on synchronous InputConnection queries from
+     * the main thread deadlocks CompletableFuture.timedGet and triggers ANRs.
+     */
+    private boolean isSameProcessWebViewEditor() {
+        if (mParent == null) {
+            return false;
+        }
+        final EditorInfo info = mParent.getCurrentInputEditorInfo();
+        if (info == null || !TextUtils.equals(info.packageName, mParent.getPackageName())) {
+            return false;
+        }
+        if (PinterestAuthSession.INSTANCE.isAuthActivityVisible()) {
+            return true;
+        }
+        final int variation = info.inputType & InputType.TYPE_MASK_VARIATION;
+        return variation == InputType.TYPE_TEXT_VARIATION_WEB_EDIT_TEXT
+                || variation == InputType.TYPE_TEXT_VARIATION_WEB_EMAIL_ADDRESS
+                || variation == InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD;
+    }
+
+    /**
      * Returns whether or not the underlying InputConnection is slow. When true, we want to avoid
      * calling InputConnection methods that trigger an IPC round-trip (e.g., getTextAfterCursor).
      */
     public boolean hasSlowInputConnection() {
-        return (SystemClock.uptimeMillis() - mLastSlowInputConnectionTime)
+        return isSameProcessWebViewEditor()
+                || (SystemClock.uptimeMillis() - mLastSlowInputConnectionTime)
                         <= SLOW_INPUTCONNECTION_PERSIST_MS;
     }
 
@@ -159,6 +184,9 @@ public final class RichInputConnection implements PrivateCommandPerformer {
     }
 
     private void checkConsistencyForDebug() {
+        if (isSameProcessWebViewEditor()) {
+            return;
+        }
         final ExtractedTextRequest r = new ExtractedTextRequest();
         r.hintMaxChars = 0;
         r.hintMaxLines = 0;
@@ -264,6 +292,17 @@ public final class RichInputConnection implements PrivateCommandPerformer {
         // be necessary when reloading text. Only when called by setSelection, mComposingText isn't
         // always empty, but looks like things still work normally
         mComposingText.setLength(0);
+        if (isSameProcessWebViewEditor()) {
+            mIC = mParent.getCurrentInputConnection();
+            if (mExpectedSelStart == INVALID_CURSOR_POSITION) {
+                final EditorInfo info = mParent.getCurrentInputEditorInfo();
+                if (info != null && info.initialSelStart >= 0 && info.initialSelEnd >= 0) {
+                    mExpectedSelStart = info.initialSelStart;
+                    mExpectedSelEnd = info.initialSelEnd;
+                }
+            }
+            return mExpectedSelStart != INVALID_CURSOR_POSITION;
+        }
         mIC = mParent.getCurrentInputConnection();
         // Call upon the inputconnection directly since our own method is using the cache, and
         // we want to refresh it.
@@ -285,7 +324,7 @@ public final class RichInputConnection implements PrivateCommandPerformer {
     }
 
     private void reloadCursorPosition() {
-        if (!isConnected()) return;
+        if (!isConnected() || isSameProcessWebViewEditor()) return;
         final ExtractedText et = mIC.getExtractedText(new ExtractedTextRequest(), 0);
         if (et == null) return;
         mExpectedSelStart = et.selectionStart + et.startOffset;
@@ -402,7 +441,7 @@ public final class RichInputConnection implements PrivateCommandPerformer {
 
     @Nullable
     public CharSequence getSelectedText(final int flags) {
-        return isConnected() ?  mIC.getSelectedText(flags) : null;
+        return (isConnected() && !isSameProcessWebViewEditor()) ? mIC.getSelectedText(flags) : null;
     }
 
     public boolean canDeleteCharacters() {
@@ -513,7 +552,7 @@ public final class RichInputConnection implements PrivateCommandPerformer {
     @Nullable private CharSequence getTextBeforeCursorAndDetectLaggyConnection(
             final int operation, final long timeout, final int n, final int flags) {
         mIC = mParent.getCurrentInputConnection();
-        if (!isConnected()) {
+        if (!isConnected() || isSameProcessWebViewEditor()) {
             return null;
         }
         final long startTime = SystemClock.uptimeMillis();
@@ -581,7 +620,7 @@ public final class RichInputConnection implements PrivateCommandPerformer {
     @Nullable private CharSequence getTextAfterCursorAndDetectLaggyConnection(
             final int operation, final long timeout, final int n, final int flags) {
         mIC = mParent.getCurrentInputConnection();
-        if (!isConnected()) {
+        if (!isConnected() || isSameProcessWebViewEditor()) {
             return null;
         }
         final long startTime = SystemClock.uptimeMillis();
@@ -741,7 +780,8 @@ public final class RichInputConnection implements PrivateCommandPerformer {
             if (DebugFlags.DEBUG_ENABLED)
                 Log.d(TAG, "setting composing text of length "+text.length()); // don't log actual text
             mIC.setComposingText(text, newCursorPosition);
-            if (!Settings.getValues().mInputAttributes.mShouldShowSuggestions && text.length() > 0) {
+            if (!Settings.getValues().mInputAttributes.mShouldShowSuggestions
+                    && text.length() > 0 && !isSameProcessWebViewEditor()) {
                 // We have a field that disables suggestions, but still committed text is set.
                 // This might lead to weird bugs (e.g. https://github.com/HeliBorg/HeliBoard/issues/225), so better do
                 // a sanity check whether the wanted text has been set.
@@ -784,6 +824,9 @@ public final class RichInputConnection implements PrivateCommandPerformer {
             mExpectedSelStart = start;
             mExpectedSelEnd = end;
         }
+        if (isSameProcessWebViewEditor()) {
+            return false;
+        }
         if (isConnected()) {
             final boolean isIcValid = mIC.setSelection(start, end);
             if (!isIcValid) {
@@ -813,6 +856,7 @@ public final class RichInputConnection implements PrivateCommandPerformer {
     }
 
     public void copyText(final boolean getSelection) {
+        if (isSameProcessWebViewEditor() || !isConnected()) return;
         CharSequence text = null;
         if (getSelection) {
             // copy selected text, and if nothing is selected copy the whole text
@@ -895,7 +939,7 @@ public final class RichInputConnection implements PrivateCommandPerformer {
      */
     @Nullable public TextAtCursor getTextAtCursor() {
         mIC = mParent.getCurrentInputConnection();
-        if (!isConnected()) {
+        if (!isConnected() || isSameProcessWebViewEditor()) {
             return null;
         }
         CharSequence before = getTextBeforeCursorAndDetectLaggyConnection(
@@ -1133,6 +1177,16 @@ public final class RichInputConnection implements PrivateCommandPerformer {
      */
     public void tryFixIncorrectCursorPosition() {
         mIC = mParent.getCurrentInputConnection();
+        if (isSameProcessWebViewEditor()) {
+            final EditorInfo info = mParent.getCurrentInputEditorInfo();
+            if (info != null && info.initialSelStart >= 0 && info.initialSelEnd >= 0) {
+                mExpectedSelStart = info.initialSelStart;
+                mExpectedSelEnd = info.initialSelEnd;
+            } else {
+                mExpectedSelStart = mExpectedSelEnd = Constants.NOT_A_CURSOR_POSITION;
+            }
+            return;
+        }
         final CharSequence textBeforeCursor = getTextBeforeCursor(
                 Constants.EDITOR_CONTENTS_CACHE_SIZE, 0);
         final CharSequence selectedText = isConnected() ? mIC.getSelectedText(0 /* flags */) : null;
@@ -1215,7 +1269,7 @@ public final class RichInputConnection implements PrivateCommandPerformer {
      */
     public boolean requestCursorUpdates(final boolean enableMonitor, final boolean requestImmediateCallback) {
         mIC = mParent.getCurrentInputConnection();
-        if (!isConnected()) {
+        if (!isConnected() || isSameProcessWebViewEditor()) {
             return false;
         }
         final int cursorUpdateMode = (enableMonitor ? InputConnection.CURSOR_UPDATE_MONITOR : 0)
