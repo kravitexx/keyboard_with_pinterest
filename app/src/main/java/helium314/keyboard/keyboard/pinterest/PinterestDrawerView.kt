@@ -359,10 +359,15 @@ class PinterestDrawerView @JvmOverloads constructor(
                 PinMediaSender.sendFromDataOrBlob(ime, url, mimeHint, null) {}
             }
             url.startsWith("http://", ignoreCase = true) || url.startsWith("https://", ignoreCase = true) -> {
+                val effectiveMime = if (url.contains("/videos/thumbnails/", ignoreCase = true)) {
+                    "video/mp4"
+                } else {
+                    mimeHint
+                }
                 PinMediaSender.sendFromUrl(
                     latinIME = ime,
                     url = url,
-                    mimeHint = mimeHint,
+                    mimeHint = effectiveMime,
                     userAgent = userAgent ?: webView?.settings?.userAgentString,
                     preferOriginals = true
                 ) {}
@@ -752,6 +757,16 @@ class PinterestDrawerView @JvmOverloads constructor(
         }
 
         @JavascriptInterface
+        fun onVideoMenuDownloadClicked() {
+            mainHandler.post {
+                val ime = latinIME ?: return@post
+                setMiniKeyboardVisible(false)
+                PinMediaSender.showToast(ime, R.string.sending_pin)
+                webView?.evaluateJavascript("window.__pinExtractCurrentMedia(true);", null)
+            }
+        }
+
+        @JavascriptInterface
         fun onWebInputFocused(focused: Boolean, inputType: String?) {
             mainHandler.post {
                 hideImeRunnable?.let { mainHandler.removeCallbacks(it) }
@@ -783,6 +798,88 @@ class PinterestDrawerView @JvmOverloads constructor(
                 if (window.__pinKeyboardHooked) return;
                 window.__pinKeyboardHooked = true;
                 window.__pinBlobMap = new Map();
+                window.__pinVideoHashMap = new Map();
+                var VIDEO_HASH_RE = /([0-9a-f]{2}\/[0-9a-f]{2}\/[0-9a-f]{2}\/[0-9a-f]{16,40})/i;
+
+                function scoreMp4Quality(url) {
+                    var l = url.toLowerCase();
+                    if (l.indexOf('1080') >= 0) return 1080;
+                    if (l.indexOf('720p') >= 0 || l.indexOf('_720w') >= 0) return 720;
+                    if (l.indexOf('540') >= 0) return 540;
+                    if (l.indexOf('480') >= 0) return 480;
+                    if (l.indexOf('360') >= 0) return 360;
+                    return 400;
+                }
+
+                function recordMp4Url(url) {
+                    if (!url || url.indexOf('.mp4') < 0 || url.indexOf('pinimg.com/videos/') < 0) return;
+                    var clean = url.replace(/\\\//g, '/');
+                    var m = clean.match(VIDEO_HASH_RE);
+                    if (!m) return;
+                    var hash = m[1].toLowerCase();
+                    var prev = window.__pinVideoHashMap.get(hash);
+                    if (!prev || scoreMp4Quality(clean) >= scoreMp4Quality(prev)) {
+                        if (window.__pinVideoHashMap.size >= 40 && !window.__pinVideoHashMap.has(hash)) {
+                            var oldest = window.__pinVideoHashMap.keys().next().value;
+                            window.__pinVideoHashMap.delete(oldest);
+                        }
+                        window.__pinVideoHashMap.set(hash, clean);
+                    }
+                }
+
+                function recordVideoText(txt) {
+                    if (!txt || txt.indexOf('pinimg.com') < 0 || txt.indexOf('.mp4') < 0) return;
+                    var norm = txt.replace(/\\\//g, '/');
+                    var matches = norm.match(/https:\/\/v\d*\.pinimg\.com\/videos\/[^"'\s\\<>]+\.mp4/g);
+                    if (matches) {
+                        for (var i = 0; i < matches.length; i++) {
+                            recordMp4Url(matches[i]);
+                        }
+                    }
+                }
+
+                if (window.fetch) {
+                    var origFetch = window.fetch;
+                    window.fetch = function() {
+                        var p = origFetch.apply(this, arguments);
+                        try {
+                            var req = arguments[0];
+                            var u = typeof req === 'string' ? req : (req && req.url) || '';
+                            if (u.indexOf('/resource/') >= 0 || u.indexOf('/graphql') >= 0) {
+                                p.then(function(resp) {
+                                    if (resp && resp.clone) {
+                                        resp.clone().text().then(recordVideoText).catch(function() {});
+                                    }
+                                }).catch(function() {});
+                            }
+                        } catch (e) {}
+                        return p;
+                    };
+                }
+
+                if (window.XMLHttpRequest && XMLHttpRequest.prototype) {
+                    var origXhrOpen = XMLHttpRequest.prototype.open;
+                    var origXhrSend = XMLHttpRequest.prototype.send;
+                    XMLHttpRequest.prototype.open = function(method, url) {
+                        this.__pinUrl = typeof url === 'string' ? url : '';
+                        return origXhrOpen.apply(this, arguments);
+                    };
+                    XMLHttpRequest.prototype.send = function() {
+                        try {
+                            var u = this.__pinUrl || '';
+                            if (u.indexOf('/resource/') >= 0 || u.indexOf('/graphql') >= 0) {
+                                this.addEventListener('load', function() {
+                                    try {
+                                        if (typeof this.responseText === 'string') {
+                                            recordVideoText(this.responseText);
+                                        }
+                                    } catch (e) {}
+                                });
+                            }
+                        } catch (e) {}
+                        return origXhrSend.apply(this, arguments);
+                    };
+                }
 
                 function storeBlob(url, blob) {
                     try {
@@ -964,12 +1061,260 @@ class PinterestDrawerView @JvmOverloads constructor(
                     return bestUrl || img.currentSrc || img.src || '';
                 }
 
-                window.__pinExtractCurrentMedia = function() {
+                function findBestVisibleVideo() {
+                    var videos = Array.from(document.querySelectorAll('video'));
+                    var best = null;
+                    var bestScore = -1;
+                    var vw = window.innerWidth || 400;
+                    var vh = window.innerHeight || 600;
+                    videos.forEach(function(v) {
+                        var r = v.getBoundingClientRect();
+                        if (r.width < 60 || r.height < 60) return;
+                        if (r.bottom <= 0 || r.top >= vh || r.right <= 0 || r.left >= vw) return;
+                        var area = r.width * r.height;
+                        var bonus = 0;
+                        try {
+                            if (!v.paused && !v.ended) bonus += 1000000;
+                            if (v.closest && v.closest('[data-test-id*="closeup"], [data-test-id*="story-pin"]')) bonus += 500000;
+                        } catch (e) {}
+                        if (area + bonus > bestScore) {
+                            bestScore = area + bonus;
+                            best = v;
+                        }
+                    });
+                    return best;
+                }
+
+                function collectMp4FromObject(rootObj) {
+                    if (!rootObj) return '';
+                    var seen = new Set();
+                    var queue = [{ o: rootObj, d: 0 }];
+                    var bestUrl = '';
+                    var bestScore = -1;
+                    var count = 0;
+                    while (queue.length > 0 && count < 120) {
+                        var item = queue.shift();
+                        var o = item.o;
+                        var d = item.d;
+                        if (!o || typeof o !== 'object' || seen.has(o)) continue;
+                        seen.add(o);
+                        count++;
+                        var vl = o.video_list;
+                        if (vl && typeof vl === 'object') {
+                            var pref = ['V_EXP7', 'V_720P', 'V_EXP6', 'V_480P', 'V_EXP5', 'V_360P'];
+                            var allKeys = pref.concat(Object.keys(vl));
+                            for (var k = 0; k < allKeys.length; k++) {
+                                var entry = vl[allKeys[k]];
+                                var u = entry && entry.url;
+                                if (typeof u === 'string' && u.indexOf('.mp4') >= 0) {
+                                    recordMp4Url(u);
+                                    var sc = scoreMp4Quality(u);
+                                    if (sc > bestScore) {
+                                        bestScore = sc;
+                                        bestUrl = u;
+                                    }
+                                }
+                            }
+                            if (bestUrl) return bestUrl;
+                        }
+                        if (d < 6) {
+                            var keys = Array.isArray(o) ? o : Object.keys(o);
+                            var limit = Array.isArray(o) ? Math.min(o.length, 16) : Math.min(keys.length, 30);
+                            for (var i = 0; i < limit; i++) {
+                                var val = Array.isArray(o) ? o[i] : o[keys[i]];
+                                if (typeof val === 'string') {
+                                    if (val.indexOf('pinimg.com/videos/') >= 0 && val.indexOf('.mp4') >= 0) {
+                                        recordMp4Url(val);
+                                        var vs = scoreMp4Quality(val);
+                                        if (vs > bestScore) {
+                                            bestScore = vs;
+                                            bestUrl = val;
+                                        }
+                                    }
+                                } else if (val && typeof val === 'object') {
+                                    queue.push({ o: val, d: d + 1 });
+                                }
+                            }
+                        }
+                    }
+                    return bestUrl;
+                }
+
+                function findVideoInFiber(videoEl) {
                     try {
-                        // 1. Direct MP4 video elements or embedded MP4 URLs in scripts
-                        var videos = Array.from(document.querySelectorAll('video'));
-                        for (var i = 0; i < videos.length; i++) {
-                            var v = videos[i];
+                        var el = videoEl;
+                        for (var up = 0; up < 16 && el; up++) {
+                            var keys = Object.keys(el);
+                            for (var i = 0; i < keys.length; i++) {
+                                var key = keys[i];
+                                if (key.indexOf('__reactProps') === 0) {
+                                    var found = collectMp4FromObject(el[key]);
+                                    if (found) return found;
+                                }
+                                if (key.indexOf('__reactFiber') === 0 || key.indexOf('__reactInternalInstance') === 0) {
+                                    var f = el[key];
+                                    for (var steps = 0; steps < 14 && f; steps++) {
+                                        var pFound = collectMp4FromObject(f.memoizedProps || f.pendingProps);
+                                        if (pFound) return pFound;
+                                        f = f.return;
+                                    }
+                                }
+                            }
+                            el = el.parentElement;
+                        }
+                    } catch (e) {}
+                    return '';
+                }
+
+                function findVideoHash(videoEl) {
+                    var srcs = [];
+                    if (videoEl) {
+                        if (videoEl.currentSrc) srcs.push(videoEl.currentSrc);
+                        if (videoEl.src) srcs.push(videoEl.src);
+                        if (videoEl.poster) srcs.push(videoEl.poster);
+                        var container = videoEl.parentElement && videoEl.parentElement.parentElement;
+                        if (container) {
+                            var sibImgs = container.querySelectorAll('img');
+                            for (var si = 0; si < sibImgs.length; si++) {
+                                if (sibImgs[si].src) srcs.push(sibImgs[si].src);
+                            }
+                        }
+                    }
+                    for (var i = 0; i < srcs.length; i++) {
+                        var m = srcs[i].match(VIDEO_HASH_RE);
+                        if (m) return m[1].toLowerCase();
+                    }
+                    try {
+                        if (window.performance && performance.getEntriesByType) {
+                            var entries = performance.getEntriesByType('resource');
+                            for (var j = entries.length - 1; j >= 0 && j >= entries.length - 80; j--) {
+                                var name = entries[j].name || '';
+                                if (name.indexOf('pinimg.com/videos/') >= 0) {
+                                    var rm = name.match(VIDEO_HASH_RE);
+                                    if (rm) return rm[1].toLowerCase();
+                                }
+                            }
+                        }
+                    } catch (e) {}
+                    return '';
+                }
+
+                function extractPinIdForVideo(videoEl) {
+                    var pm = location.pathname.match(/\/pin\/(?:[^\/]+--)?(\d{8,24})/);
+                    if (pm) return pm[1];
+                    if (videoEl && videoEl.closest) {
+                        var link = videoEl.closest('a[href*="/pin/"]');
+                        if (link) {
+                            var lm = (link.getAttribute('href') || '').match(/\/pin\/(?:[^\/]+--)?(\d{8,24})/);
+                            if (lm) return lm[1];
+                        }
+                    }
+                    return '';
+                }
+
+                function scanScriptsForVideo(hash) {
+                    var scripts = Array.from(document.querySelectorAll('script[type="application/ld+json"], script#__PWS_DATA__, script[data-relay-response], script'));
+                    for (var j = 0; j < scripts.length; j++) {
+                        var txt = scripts[j].textContent || '';
+                        if (txt.indexOf('pinimg.com/videos/') < 0 || txt.indexOf('.mp4') < 0) continue;
+                        recordVideoText(txt);
+                        if (hash && window.__pinVideoHashMap.has(hash)) {
+                            return window.__pinVideoHashMap.get(hash);
+                        }
+                        if (!hash) {
+                            var norm = txt.replace(/\\\//g, '/');
+                            var m = norm.match(/https:\/\/v\d*\.pinimg\.com\/videos\/[^"'\s\\<>]+\.mp4/);
+                            if (m && m[0]) return m[0];
+                        }
+                    }
+                    return hash ? (window.__pinVideoHashMap.get(hash) || '') : '';
+                }
+
+                // Inject a "Download video" option into Pinterest's ... bottom sheet on video pins
+                function tryInjectVideoMenuOption() {
+                    if (document.getElementById('__pinSendVideoMenuItem')) return;
+                    var bestVideo = findBestVisibleVideo();
+                    if (!bestVideo) return;
+
+                    var candidates = Array.from(document.querySelectorAll('[role="dialog"], [role="menu"], [data-test-id*="action-sheet"], [data-test-id*="dropdown"]'));
+                    if (candidates.length === 0) {
+                        var fixedDivs = Array.from(document.querySelectorAll('body > div, div[role="presentation"]'));
+                        candidates = fixedDivs;
+                    }
+
+                    for (var c = candidates.length - 1; c >= 0; c--) {
+                        var sheet = candidates[c];
+                        if (!sheet || !sheet.innerText) continue;
+                        var txt = sheet.innerText;
+                        if (txt.indexOf('Open in app') < 0 && txt.indexOf('Report Pin') < 0 && txt.indexOf('See more') < 0) continue;
+                        if (/download\s*video/i.test(txt)) return; // already has video download option
+
+                        var items = Array.from(sheet.querySelectorAll('a, button, [role="button"], [role="menuitem"]'));
+                        var anchorItem = null;
+                        for (var i = 0; i < items.length; i++) {
+                            var it = items[i];
+                            var t = (it.innerText || it.textContent || '').trim();
+                            if (t === 'Open in app' || t === 'See more' || t === 'Report Pin') {
+                                anchorItem = it;
+                                break;
+                            }
+                        }
+                        if (!anchorItem || !anchorItem.parentElement) continue;
+
+                        var row = document.createElement('div');
+                        row.id = '__pinSendVideoMenuItem';
+                        row.setAttribute('role', 'button');
+                        row.setAttribute('tabindex', '0');
+                        var cs = window.getComputedStyle(anchorItem);
+                        row.textContent = 'Download video';
+                        row.style.cssText = 'display:flex;align-items:center;width:100%;box-sizing:border-box;cursor:pointer;' +
+                            'font-family:' + cs.fontFamily + ';font-size:' + (cs.fontSize || '16px') + ';' +
+                            'font-weight:' + (cs.fontWeight || '600') + ';color:' + (cs.color || 'inherit') + ';' +
+                            'padding:' + (cs.padding && cs.padding !== '0px' ? cs.padding : '14px 20px') + ';' +
+                            'min-height:' + (cs.minHeight || '44px') + ';';
+
+                        (function(targetSheet) {
+                            row.addEventListener('click', function(ev) {
+                                ev.preventDefault();
+                                ev.stopPropagation();
+                                try {
+                                    var closeBtn = targetSheet.querySelector('button[aria-label*="Close" i], button[aria-label*="close" i], [data-test-id*="close"] button');
+                                    if (!closeBtn) {
+                                        var btns = targetSheet.querySelectorAll('button');
+                                        for (var bi = 0; bi < btns.length; bi++) {
+                                            if (!(btns[bi].innerText || '').trim()) { closeBtn = btns[bi]; break; }
+                                        }
+                                    }
+                                    if (closeBtn) closeBtn.click();
+                                } catch (err) {}
+                                window.PinterestBridge.onVideoMenuDownloadClicked();
+                            }, true);
+                        })(sheet);
+
+                        anchorItem.parentElement.insertBefore(row, anchorItem);
+                        return;
+                    }
+                }
+
+                try {
+                    var sheetTimer = null;
+                    var obs = new MutationObserver(function() {
+                        if (sheetTimer) return;
+                        sheetTimer = setTimeout(function() {
+                            sheetTimer = null;
+                            tryInjectVideoMenuOption();
+                        }, 80);
+                    });
+                    obs.observe(document.documentElement, { childList: true, subtree: true });
+                } catch (e) {}
+
+                window.__pinExtractCurrentMedia = function(videoOnly) {
+                    try {
+                        // 1. Check active visible <video> element or explicit video request
+                        var activeVideo = findBestVisibleVideo();
+                        var videoList = activeVideo ? [activeVideo] : Array.from(document.querySelectorAll('video'));
+                        for (var i = 0; i < videoList.length; i++) {
+                            var v = videoList[i];
                             var vSrc = v.currentSrc || v.src || '';
                             if (vSrc && vSrc.indexOf('.mp4') >= 0) {
                                 window.PinterestBridge.onExtractedPinMedia(vSrc, 'video/mp4', '');
@@ -991,17 +1336,69 @@ class PinterestDrawerView @JvmOverloads constructor(
                             return;
                         }
 
-                        // Check JSON-LD or PWS state if currently viewing a video pin with HLS only
-                        if (videos.length > 0 || location.pathname.indexOf('/pin/') >= 0) {
-                            var scripts = Array.from(document.querySelectorAll('script[type="application/ld+json"], script#__PWS_DATA__, script[data-relay-response]'));
-                            for (var j = 0; j < scripts.length; j++) {
-                                var txt = scripts[j].textContent || '';
-                                var mp4Match = txt.match(/https:\/\/v\d*\.pinimg\.com\/videos\/[^"'\s\\]+\.mp4/);
-                                if (mp4Match && mp4Match[0]) {
-                                    window.PinterestBridge.onExtractedPinMedia(mp4Match[0], 'video/mp4', '');
-                                    return;
-                                }
+                        var hash = findVideoHash(activeVideo || videoList[0]);
+                        if (activeVideo) {
+                            var fiberMp4 = findVideoInFiber(activeVideo);
+                            if (fiberMp4) {
+                                window.PinterestBridge.onExtractedPinMedia(fiberMp4, 'video/mp4', '');
+                                return;
                             }
+                            if (hash && window.__pinVideoHashMap.has(hash)) {
+                                window.PinterestBridge.onExtractedPinMedia(window.__pinVideoHashMap.get(hash), 'video/mp4', '');
+                                return;
+                            }
+                            var scriptMp4 = scanScriptsForVideo(hash);
+                            if (scriptMp4 && (hash || location.pathname.indexOf('/pin/') >= 0)) {
+                                window.PinterestBridge.onExtractedPinMedia(scriptMp4, 'video/mp4', '');
+                                return;
+                            }
+                        } else if (videoOnly || location.pathname.indexOf('/pin/') >= 0) {
+                            var pageMp4 = scanScriptsForVideo(hash);
+                            if (pageMp4) {
+                                window.PinterestBridge.onExtractedPinMedia(pageMp4, 'video/mp4', '');
+                                return;
+                            }
+                        }
+
+                        // Async resolution via Pinterest's PinResource endpoint & CDN video hash fallback
+                        if (activeVideo || videoOnly) {
+                            var pinId = extractPinIdForVideo(activeVideo);
+                            var fallbackVideoUrl = hash ? ('https://v1.pinimg.com/videos/iht/hls/' + hash + '.m3u8') : '';
+                            if (pinId) {
+                                var payload = encodeURIComponent(JSON.stringify({
+                                    options: { field_set_key: 'unauth_react_main_pin', id: pinId }
+                                }));
+                                fetch('/resource/PinResource/get/?data=' + payload, {
+                                    credentials: 'include',
+                                    headers: {
+                                        'X-Pinterest-PWS-Handler': 'www/[username].js',
+                                        'Accept': 'application/json'
+                                    }
+                                }).then(function(r) { return r.json(); }).then(function(data) {
+                                    var root = data && data.resource_response && data.resource_response.data;
+                                    var mp4 = collectMp4FromObject(root);
+                                    if (mp4) {
+                                        window.PinterestBridge.onExtractedPinMedia(mp4, 'video/mp4', '');
+                                    } else if (fallbackVideoUrl) {
+                                        window.PinterestBridge.onExtractedPinMedia(fallbackVideoUrl, 'video/mp4', '');
+                                    } else {
+                                        window.PinterestBridge.onExtractedPinMedia('pinid://' + pinId, 'video/mp4', '');
+                                    }
+                                }).catch(function() {
+                                    if (fallbackVideoUrl) {
+                                        window.PinterestBridge.onExtractedPinMedia(fallbackVideoUrl, 'video/mp4', '');
+                                    } else {
+                                        window.PinterestBridge.onExtractedPinMedia('pinid://' + pinId, 'video/mp4', '');
+                                    }
+                                });
+                                return;
+                            }
+                            if (fallbackVideoUrl) {
+                                window.PinterestBridge.onExtractedPinMedia(fallbackVideoUrl, 'video/mp4', '');
+                                return;
+                            }
+                            window.PinterestBridge.onExtractedPinMedia('', '', '');
+                            return;
                         }
 
                         // 2. Hero closeup image selectors or largest visible pinimg image

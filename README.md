@@ -11,7 +11,7 @@ An Android keyboard built on top of [HeliBoard](https://github.com/HeliBorg/Heli
   - Persistent cookie & login session — sign in once and stay signed in across apps and restarts.
   - Built-in expandable drawer height (Normal / Expanded / Typing mode) with back, home, send-pin, and close controls.
 - **Direct-to-Chat Sending Across Apps**
-  - Tap Pinterest's native **`••• -> Download`** menu inside the drawer, or tap the toolbar **Send Current Pin** button, to grab the full-resolution media (`i.pinimg.com/originals` when available, with automatic fallback) and send it directly into the active app.
+  - Tap Pinterest's native **`••• -> Download`** menu (or the injected **`Download video`** option on Video Pins), or tap the toolbar **Send Current Pin** button, to grab the full-resolution media (`i.pinimg.com/originals` for images/GIFs, progressive `.mp4` video streams for videos) and send it directly into the active app.
   - Uses Android's `InputConnectionCompat.commitContent` when supported by the target app and falls back seamlessly to `ACTION_SEND` for apps like WhatsApp, Instagram, ChatGPT, Gemini, and more.
 - **In-Drawer Mini Keyboard & Google Account Helper**
   - Focused search bars, comments, and email/password fields inside the drawer bring up an isolated in-drawer mini keyboard with clipboard paste and a native Android Google account chooser helper (`PinterestAuthActivity`).
@@ -41,7 +41,7 @@ Requires JDK 17 and the Android SDK (`compileSdk 37`, `minSdk 21`):
 ```
 
 Generated APK path:
-`app/build/outputs/apk/debug/HeliBoard_4.3-pin1-debug.apk`
+`app/build/outputs/apk/debug/HeliBoard_4.3-pin2-debug.apk`
 
 ---
 

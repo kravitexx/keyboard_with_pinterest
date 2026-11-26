@@ -20,10 +20,13 @@ import helium314.keyboard.keyboard.KeyboardSwitcher
 import helium314.keyboard.latin.LatinIME
 import helium314.keyboard.latin.R
 import helium314.keyboard.latin.utils.Log
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLEncoder
 import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -35,6 +38,10 @@ object PinMediaSender {
     private val CACHE_MAX_AGE_MS = TimeUnit.HOURS.toMillis(1)
     private val PINIMG_SIZE_REGEX = Regex(
         """^(https?://i\.pinimg\.com/)(?:236x|474x|564x|600x315|736x|1200x)(/.+)$""",
+        RegexOption.IGNORE_CASE
+    )
+    private val VIDEO_HASH_REGEX = Regex(
+        """([0-9a-f]{2}/[0-9a-f]{2}/[0-9a-f]{2}/[0-9a-f]{16,40})""",
         RegexOption.IGNORE_CASE
     )
 
@@ -53,7 +60,7 @@ object PinMediaSender {
         executor.execute {
             try {
                 val cacheDir = prepareAndPruneCacheDir(appContext)
-                val candidates = buildCandidateUrls(url, preferOriginals)
+                val candidates = buildCandidateUrls(url, mimeHint, userAgent, preferOriginals)
                 var downloaded: DownloadedMediaFile? = null
                 for (candidate in candidates) {
                     downloaded = downloadToFile(candidate, userAgent, cacheDir)
@@ -150,12 +157,134 @@ object PinMediaSender {
         return dir
     }
 
-    private fun buildCandidateUrls(url: String, preferOriginals: Boolean): List<String> {
+    private fun buildCandidateUrls(
+        url: String,
+        mimeHint: String?,
+        userAgent: String?,
+        preferOriginals: Boolean
+    ): List<String> {
         val clean = url.trim()
+        if (clean.startsWith("pinid://", ignoreCase = true)) {
+            val pinId = clean.removePrefix("pinid://").trim()
+            val resolved = resolveVideoUrlsFromPinResource(pinId, userAgent)
+            if (resolved.isNotEmpty()) return resolved
+            return emptyList()
+        }
+
+        val isVideoHint = mimeHint?.startsWith("video/", ignoreCase = true) == true
+        val lower = clean.lowercase(Locale.US)
+        val isVideoPath = lower.contains(".pinimg.com/videos/") || lower.contains(".m3u8") || lower.contains(".mp4")
+        if (isVideoHint || isVideoPath) {
+            val candidates = LinkedHashSet<String>()
+            if (lower.substringBefore('?').substringBefore('#').endsWith(".mp4")) {
+                candidates.add(clean)
+            }
+            val hashMatch = VIDEO_HASH_REGEX.find(clean)
+            if (hashMatch != null) {
+                val hash = hashMatch.groupValues[1]
+                val preferMc = lower.contains("/videos/mc/")
+                if (preferMc) {
+                    candidates.add("https://v1.pinimg.com/videos/mc/720p/$hash.mp4")
+                    candidates.add("https://v1.pinimg.com/videos/mc/expMp4/${hash}_720w.mp4")
+                    candidates.add("https://v1.pinimg.com/videos/iht/720p/$hash.mp4")
+                    candidates.add("https://v1.pinimg.com/videos/iht/expMp4/${hash}_720w.mp4")
+                } else {
+                    candidates.add("https://v1.pinimg.com/videos/iht/720p/$hash.mp4")
+                    candidates.add("https://v1.pinimg.com/videos/iht/expMp4/${hash}_720w.mp4")
+                    candidates.add("https://v1.pinimg.com/videos/mc/720p/$hash.mp4")
+                    candidates.add("https://v1.pinimg.com/videos/mc/expMp4/${hash}_720w.mp4")
+                }
+                candidates.add("https://v1.pinimg.com/videos/iht/expMp4/${hash}_540w.mp4")
+                candidates.add("https://v1.pinimg.com/videos/iht/expMp4/${hash}_480w.mp4")
+                candidates.add("https://v1.pinimg.com/videos/iht/expMp4/${hash}_360w.mp4")
+                if (lower.contains("/videos/thumbnails/")) {
+                    candidates.add(clean)
+                }
+            }
+            if (candidates.isNotEmpty()) return candidates.toList()
+        }
+
         if (!preferOriginals) return listOf(clean)
         val match = PINIMG_SIZE_REGEX.matchEntire(clean) ?: return listOf(clean)
         val originalsUrl = "${match.groupValues[1]}originals${match.groupValues[2]}"
         return if (originalsUrl == clean) listOf(clean) else listOf(originalsUrl, clean)
+    }
+
+    private fun resolveVideoUrlsFromPinResource(pinId: String, userAgent: String?): List<String> {
+        if (pinId.isBlank()) return emptyList()
+        return runCatching {
+            val dataJson = JSONObject().apply {
+                put("options", JSONObject().apply {
+                    put("field_set_key", "unauth_react_main_pin")
+                    put("id", pinId)
+                })
+            }.toString()
+            val apiUrl = "https://www.pinterest.com/resource/PinResource/get/?data=" +
+                URLEncoder.encode(dataJson, "UTF-8")
+            val conn = (URL(apiUrl).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 10_000
+                readTimeout = 12_000
+                requestMethod = "GET"
+                setRequestProperty("Accept", "application/json")
+                setRequestProperty("X-Pinterest-PWS-Handler", "www/[username].js")
+                setRequestProperty("Referer", "https://www.pinterest.com/pin/$pinId/")
+                if (!userAgent.isNullOrBlank()) {
+                    setRequestProperty("User-Agent", userAgent)
+                }
+                val cookies = runCatching { CookieManager.getInstance().getCookie(apiUrl) }.getOrNull()
+                if (!cookies.isNullOrBlank()) {
+                    setRequestProperty("Cookie", cookies)
+                }
+            }
+            try {
+                if (conn.responseCode !in 200..299) return@runCatching emptyList()
+                val text = conn.inputStream.bufferedReader().use { it.readText() }
+                val root = JSONObject(text)
+                val data = root.optJSONObject("resource_response")?.optJSONObject("data") ?: return@runCatching emptyList()
+                val found = mutableListOf<String>()
+                collectVideoUrlsFromJson(data, found)
+                found.distinct()
+            } finally {
+                conn.disconnect()
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    private fun collectVideoUrlsFromJson(node: Any?, out: MutableList<String>) {
+        when (node) {
+            is JSONObject -> {
+                val vl = node.optJSONObject("video_list")
+                if (vl != null) {
+                    val orderedKeys = listOf("V_EXP7", "V_720P", "V_EXP6", "V_480P", "V_EXP5", "V_360P")
+                    for (k in orderedKeys) {
+                        val u = vl.optJSONObject(k)?.optString("url")
+                        if (!u.isNullOrBlank() && u.lowercase(Locale.US).contains(".mp4")) {
+                            out.add(u)
+                        }
+                    }
+                    val keys = vl.keys()
+                    while (keys.hasNext()) {
+                        val k = keys.next()
+                        val u = vl.optJSONObject(k)?.optString("url")
+                        if (!u.isNullOrBlank() && u.lowercase(Locale.US).contains(".mp4")) {
+                            out.add(u)
+                        }
+                    }
+                }
+                val keys = node.keys()
+                while (keys.hasNext()) {
+                    val k = keys.next()
+                    if (k != "video_list") {
+                        collectVideoUrlsFromJson(node.opt(k), out)
+                    }
+                }
+            }
+            is JSONArray -> {
+                for (i in 0 until node.length()) {
+                    collectVideoUrlsFromJson(node.opt(i), out)
+                }
+            }
+        }
     }
 
     private data class DownloadedMediaFile(
@@ -203,6 +332,14 @@ object PinMediaSender {
                     return null
                 }
                 val contentType = conn.contentType?.substringBefore(';')?.trim()
+                val lowerType = contentType?.lowercase(Locale.US).orEmpty()
+                if (lowerType.startsWith("text/") ||
+                    lowerType.contains("mpegurl") ||
+                    lowerType.contains("json")
+                ) {
+                    Log.w(TAG, "Rejecting non-media Content-Type '$contentType' for $currentUrl")
+                    return null
+                }
                 val header = ByteArray(32)
                 var headerLen = 0
                 var total = 0L
