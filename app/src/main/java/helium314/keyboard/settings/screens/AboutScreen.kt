@@ -11,16 +11,33 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.dp
 import androidx.core.net.toUri
 import helium314.keyboard.latin.BuildConfig
 import helium314.keyboard.latin.R
@@ -31,9 +48,12 @@ import helium314.keyboard.latin.utils.Log
 import helium314.keyboard.latin.utils.SpannableStringUtils
 import helium314.keyboard.latin.utils.getActivity
 import helium314.keyboard.latin.utils.prefs
+import helium314.keyboard.settings.AppUpdater
+import helium314.keyboard.settings.InstallLaunchResult
 import helium314.keyboard.settings.SettingsContainer
 import helium314.keyboard.settings.SettingsWithoutKey
 import helium314.keyboard.settings.Setting
+import helium314.keyboard.settings.UpdateCheckResult
 import helium314.keyboard.settings.preferences.Preference
 import helium314.keyboard.settings.SearchSettingsScreen
 import helium314.keyboard.settings.SettingsActivity
@@ -41,6 +61,7 @@ import helium314.keyboard.latin.utils.Theme
 import helium314.keyboard.latin.utils.previewDark
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import androidx.core.content.edit
@@ -54,6 +75,7 @@ fun AboutScreen(
     val items = listOf(
         SettingsWithoutKey.APP,
         SettingsWithoutKey.VERSION,
+        SettingsWithoutKey.CHECK_UPDATES,
         SettingsWithoutKey.LICENSE,
         SettingsWithoutKey.HIDDEN_FEATURES,
         SettingsWithoutKey.GITHUB_WIKI,
@@ -94,6 +116,190 @@ fun createAboutSettings(context: Context) = listOf(
             },
             icon = R.drawable.ic_settings_about_version
         )
+    },
+    Setting(context, SettingsWithoutKey.CHECK_UPDATES, R.string.about_check_updates, R.string.about_check_updates_summary) {
+        val ctx = LocalContext.current
+        val scope = rememberCoroutineScope()
+        var showDialog by remember { mutableStateOf(false) }
+        var isChecking by remember { mutableStateOf(false) }
+        var checkResult by remember { mutableStateOf<UpdateCheckResult?>(null) }
+        var isDownloading by remember { mutableStateOf(false) }
+        var downloadProgress by remember { mutableIntStateOf(0) }
+        var downloadedApk by remember { mutableStateOf<File?>(null) }
+        var statusError by remember { mutableStateOf<String?>(null) }
+
+        Preference(
+            name = it.title,
+            description = it.description,
+            onClick = {
+                showDialog = true
+                isChecking = true
+                checkResult = null
+                downloadedApk = null
+                statusError = null
+            },
+            icon = R.drawable.ic_settings_about_version
+        )
+
+        if (showDialog) {
+            LaunchedEffect(showDialog, isChecking) {
+                if (isChecking) {
+                    checkResult = AppUpdater.checkForUpdates()
+                    isChecking = false
+                }
+            }
+            AlertDialog(
+                onDismissRequest = {
+                    if (!isDownloading) showDialog = false
+                },
+                title = {
+                    val title = when (val res = checkResult) {
+                        is UpdateCheckResult.UpdateAvailable ->
+                            stringResource(R.string.update_available_title, res.release.versionName)
+                        else -> stringResource(R.string.about_check_updates)
+                    }
+                    Text(title)
+                },
+                text = {
+                    Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                        when {
+                            isChecking -> {
+                                CircularProgressIndicator()
+                                Spacer(Modifier.height(12.dp))
+                                Text(stringResource(R.string.update_checking))
+                            }
+                            isDownloading -> {
+                                LinearProgressIndicator(
+                                    progress = { downloadProgress / 100f },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                Spacer(Modifier.height(10.dp))
+                                Text(stringResource(R.string.update_downloading, downloadProgress))
+                            }
+                            downloadedApk != null -> {
+                                Text(statusError ?: stringResource(R.string.update_install_permission_hint))
+                            }
+                            else -> {
+                                when (val res = checkResult) {
+                                    is UpdateCheckResult.UpToDate ->
+                                        Text(stringResource(R.string.update_up_to_date, res.currentVersion))
+                                    is UpdateCheckResult.NoReleases ->
+                                        Text(stringResource(R.string.update_no_releases, res.currentVersion))
+                                    is UpdateCheckResult.Error ->
+                                        Text(stringResource(R.string.update_check_failed, res.message))
+                                    is UpdateCheckResult.UpdateAvailable -> {
+                                        Text(
+                                            stringResource(
+                                                R.string.update_available_summary,
+                                                res.currentVersion,
+                                                res.release.versionName
+                                            )
+                                        )
+                                        if (res.release.releaseNotes.isNotBlank()) {
+                                            Spacer(Modifier.height(10.dp))
+                                            Text(res.release.releaseNotes)
+                                        }
+                                    }
+                                    null -> Unit
+                                }
+                                statusError?.let { err ->
+                                    Spacer(Modifier.height(8.dp))
+                                    Text(err)
+                                }
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    val available = checkResult as? UpdateCheckResult.UpdateAvailable
+                    val apkFile = downloadedApk
+                    when {
+                        apkFile != null && !isDownloading -> {
+                            Button(onClick = {
+                                when (val res = AppUpdater.installApk(ctx, apkFile)) {
+                                    InstallLaunchResult.Launched -> showDialog = false
+                                    InstallLaunchResult.NeedsUnknownSourcesPermission -> {
+                                        statusError = ctx.getString(R.string.update_install_permission_hint)
+                                    }
+                                    is InstallLaunchResult.Failed -> {
+                                        statusError = res.message
+                                    }
+                                }
+                            }) {
+                                Text(stringResource(R.string.update_install_now))
+                            }
+                        }
+                        available != null && available.release.apkUrl != null && !isChecking && !isDownloading -> {
+                            Button(onClick = {
+                                val url = available.release.apkUrl
+                                isDownloading = true
+                                downloadProgress = 0
+                                statusError = null
+                                scope.launch {
+                                    try {
+                                        val file = AppUpdater.downloadApk(ctx, url, available.release.apkName) { pct ->
+                                            downloadProgress = pct
+                                        }
+                                        isDownloading = false
+                                        when (val installRes = AppUpdater.installApk(ctx, file)) {
+                                            InstallLaunchResult.Launched -> showDialog = false
+                                            InstallLaunchResult.NeedsUnknownSourcesPermission -> {
+                                                downloadedApk = file
+                                                statusError = ctx.getString(R.string.update_install_permission_hint)
+                                            }
+                                            is InstallLaunchResult.Failed -> {
+                                                downloadedApk = file
+                                                statusError = installRes.message
+                                            }
+                                        }
+                                    } catch (e: Exception) {
+                                        isDownloading = false
+                                        statusError = ctx.getString(
+                                            R.string.update_download_failed,
+                                            e.message ?: e::class.java.simpleName
+                                        )
+                                    }
+                                }
+                            }) {
+                                Text(stringResource(R.string.update_download_install))
+                            }
+                        }
+                        available != null && !isChecking && !isDownloading -> {
+                            Button(onClick = {
+                                runCatching {
+                                    ctx.startActivity(Intent(Intent.ACTION_VIEW, available.release.htmlUrl.toUri()))
+                                }
+                                showDialog = false
+                            }) {
+                                Text(stringResource(R.string.update_open_release_page))
+                            }
+                        }
+                    }
+                },
+                dismissButton = {
+                    val releaseUrl = when (val res = checkResult) {
+                        is UpdateCheckResult.UpToDate -> res.htmlUrl
+                        is UpdateCheckResult.NoReleases -> res.htmlUrl
+                        is UpdateCheckResult.UpdateAvailable -> res.release.htmlUrl
+                        else -> null
+                    }
+                    if (!isDownloading) {
+                        if (releaseUrl != null && downloadedApk == null && checkResult !is UpdateCheckResult.UpdateAvailable) {
+                            TextButton(onClick = {
+                                runCatching {
+                                    ctx.startActivity(Intent(Intent.ACTION_VIEW, releaseUrl.toUri()))
+                                }
+                            }) {
+                                Text(stringResource(R.string.update_open_release_page))
+                            }
+                        }
+                        TextButton(onClick = { showDialog = false }) {
+                            Text(stringResource(R.string.dialog_close))
+                        }
+                    }
+                }
+            )
+        }
     },
     Setting(context, SettingsWithoutKey.LICENSE, R.string.license, R.string.gnu_gpl) {
         val ctx = LocalContext.current

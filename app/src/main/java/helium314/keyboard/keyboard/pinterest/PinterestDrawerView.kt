@@ -23,6 +23,7 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.FrameLayout
 import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.ProgressBar
@@ -61,7 +62,8 @@ class PinterestDrawerView @JvmOverloads constructor(
     private lateinit var btnHeight: ImageButton
     private lateinit var btnClose: ImageButton
     private lateinit var progressBar: ProgressBar
-    private lateinit var webView: WebView
+    private lateinit var webViewContainer: FrameLayout
+    private var webView: WebView? = null
 
     private lateinit var imeContainer: View
     private lateinit var imeBar: View
@@ -71,17 +73,27 @@ class PinterestDrawerView @JvmOverloads constructor(
     private lateinit var imeHideBtn: ImageButton
     private lateinit var miniKeyboardView: MainKeyboardView
 
+    private data class MiniLayoutKey(val width: Int, val height: Int, val subtype: String)
+
     private var latinIME: LatinIME? = null
+    private var viewsBound = false
     private var initialized = false
+    private var lastVisitedUrl: String? = null
     private var isExpandedHeight = false
     private var isImeVisible = false
     private var isSymbolsMode = false
     private var isShiftedMode = false
     private var isCapsLocked = false
     private var miniLayoutSet: KeyboardLayoutSet? = null
+    private var miniLayoutKey: MiniLayoutKey? = null
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private var hideImeRunnable: Runnable? = null
+    private val idleUnloadRunnable = Runnable {
+        if (!this@PinterestDrawerView.isVisible) {
+            unloadWebView(preserveUrl = true)
+        }
+    }
 
     private var lastCapturedKey: String? = null
     private var lastCapturedTimeMs: Long = 0L
@@ -108,31 +120,50 @@ class PinterestDrawerView @JvmOverloads constructor(
 
     @SuppressLint("SetJavaScriptEnabled", "AddJavascriptInterface")
     private fun ensureInitialized() {
-        if (initialized) return
+        if (!viewsBound) {
+            viewsBound = true
+            controlBar = findViewById(R.id.pinterest_control_bar)
+            btnBack = findViewById(R.id.pinterest_btn_back)
+            btnHome = findViewById(R.id.pinterest_btn_home)
+            titleView = findViewById(R.id.pinterest_title)
+            btnSend = findViewById(R.id.pinterest_btn_send)
+            btnHeight = findViewById(R.id.pinterest_btn_height)
+            btnClose = findViewById(R.id.pinterest_btn_close)
+            progressBar = findViewById(R.id.pinterest_progress)
+            webViewContainer = findViewById(R.id.pinterest_webview_container)
+
+            imeContainer = findViewById(R.id.pinterest_ime_container)
+            imeBar = findViewById(R.id.pinterest_ime_bar)
+            imeLabel = findViewById(R.id.pinterest_ime_label)
+            imeAccountBtn = findViewById(R.id.pinterest_ime_account)
+            imePasteBtn = findViewById(R.id.pinterest_ime_paste)
+            imeHideBtn = findViewById(R.id.pinterest_ime_hide)
+            miniKeyboardView = findViewById(R.id.pinterest_mini_keyboard)
+
+            applyThemeColors()
+            setupControls()
+            setupMiniKeyboard()
+        }
+        ensureWebView()
         initialized = true
+    }
 
-        controlBar = findViewById(R.id.pinterest_control_bar)
-        btnBack = findViewById(R.id.pinterest_btn_back)
-        btnHome = findViewById(R.id.pinterest_btn_home)
-        titleView = findViewById(R.id.pinterest_title)
-        btnSend = findViewById(R.id.pinterest_btn_send)
-        btnHeight = findViewById(R.id.pinterest_btn_height)
-        btnClose = findViewById(R.id.pinterest_btn_close)
-        progressBar = findViewById(R.id.pinterest_progress)
-        webView = findViewById(R.id.pinterest_webview)
-
-        imeContainer = findViewById(R.id.pinterest_ime_container)
-        imeBar = findViewById(R.id.pinterest_ime_bar)
-        imeLabel = findViewById(R.id.pinterest_ime_label)
-        imeAccountBtn = findViewById(R.id.pinterest_ime_account)
-        imePasteBtn = findViewById(R.id.pinterest_ime_paste)
-        imeHideBtn = findViewById(R.id.pinterest_ime_hide)
-        miniKeyboardView = findViewById(R.id.pinterest_mini_keyboard)
-
-        applyThemeColors()
-        setupControls()
-        setupWebView()
-        setupMiniKeyboard()
+    private fun ensureWebView(): WebView {
+        webView?.let { return it }
+        val existing = findViewById<WebView?>(R.id.pinterest_webview)
+        val wv = existing ?: WebView(context).apply {
+            id = R.id.pinterest_webview
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+            isFocusable = true
+            isFocusableInTouchMode = true
+            webViewContainer.addView(this)
+        }
+        webView = wv
+        setupWebView(wv)
+        return wv
     }
 
     private fun applyThemeColors() {
@@ -152,15 +183,17 @@ class PinterestDrawerView @JvmOverloads constructor(
     private fun setupControls() {
         btnBack.setOnClickListener {
             performKeyFeedback(it)
-            if (webView.canGoBack()) {
-                webView.goBack()
+            val wv = webView
+            if (wv != null && wv.canGoBack()) {
+                wv.goBack()
             } else {
                 closePanel()
             }
         }
         btnHome.setOnClickListener {
             performKeyFeedback(it)
-            webView.loadUrl(PINTEREST_HOME_URL)
+            lastVisitedUrl = PINTEREST_HOME_URL
+            ensureWebView().loadUrl(PINTEREST_HOME_URL)
         }
         btnSend.setOnClickListener {
             performKeyFeedback(it)
@@ -177,7 +210,7 @@ class PinterestDrawerView @JvmOverloads constructor(
         imeHideBtn.setOnClickListener {
             performKeyFeedback(it)
             setMiniKeyboardVisible(false)
-            webView.evaluateJavascript("document.activeElement && document.activeElement.blur && document.activeElement.blur();", null)
+            webView?.evaluateJavascript("document.activeElement && document.activeElement.blur && document.activeElement.blur();", null)
         }
         imeAccountBtn.setOnClickListener {
             performKeyFeedback(it)
@@ -189,9 +222,9 @@ class PinterestDrawerView @JvmOverloads constructor(
         }
     }
 
-    @SuppressLint("SetJavaScriptEnabled")
-    private fun setupWebView() {
-        val settings = webView.settings
+    @SuppressLint("SetJavaScriptEnabled", "AddJavascriptInterface")
+    private fun setupWebView(targetWebView: WebView) {
+        val settings = targetWebView.settings
         settings.javaScriptEnabled = true
         settings.domStorageEnabled = true
         settings.loadsImagesAutomatically = true
@@ -208,11 +241,11 @@ class PinterestDrawerView @JvmOverloads constructor(
 
         val cookieManager = CookieManager.getInstance()
         cookieManager.setAcceptCookie(true)
-        cookieManager.setAcceptThirdPartyCookies(webView, true)
+        cookieManager.setAcceptThirdPartyCookies(targetWebView, true)
 
-        webView.addJavascriptInterface(PinterestJsBridge(), JS_BRIDGE_NAME)
+        targetWebView.addJavascriptInterface(PinterestJsBridge(), JS_BRIDGE_NAME)
 
-        webView.webChromeClient = object : WebChromeClient() {
+        targetWebView.webChromeClient = object : WebChromeClient() {
             override fun onProgressChanged(view: WebView?, newProgress: Int) {
                 progressBar.isVisible = newProgress in 1..99
                 progressBar.progress = newProgress
@@ -236,7 +269,7 @@ class PinterestDrawerView @JvmOverloads constructor(
             }
         }
 
-        webView.webViewClient = object : WebViewClient() {
+        targetWebView.webViewClient = object : WebViewClient() {
             @Deprecated("Deprecated in Java")
             override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean {
                 return handleUrlLoading(url)
@@ -259,7 +292,7 @@ class PinterestDrawerView @JvmOverloads constructor(
             }
         }
 
-        webView.setDownloadListener { url, userAgent, _, mimetype, _ ->
+        targetWebView.setDownloadListener { url, userAgent, _, mimetype, _ ->
             if (url.isNullOrBlank()) return@setDownloadListener
             handleDownloadIntercepted(url, userAgent, mimetype)
         }
@@ -320,7 +353,7 @@ class PinterestDrawerView @JvmOverloads constructor(
         when {
             url.startsWith("blob:", ignoreCase = true) -> {
                 val escaped = JSONObject.quote(url)
-                webView.evaluateJavascript("window.__pinReadBlobUrl($escaped, '');", null)
+                webView?.evaluateJavascript("window.__pinReadBlobUrl($escaped, '');", null)
             }
             url.startsWith("data:", ignoreCase = true) -> {
                 PinMediaSender.sendFromDataOrBlob(ime, url, mimeHint, null) {}
@@ -330,7 +363,7 @@ class PinterestDrawerView @JvmOverloads constructor(
                     latinIME = ime,
                     url = url,
                     mimeHint = mimeHint,
-                    userAgent = userAgent ?: webView.settings.userAgentString,
+                    userAgent = userAgent ?: webView?.settings?.userAgentString,
                     preferOriginals = true
                 ) {}
             }
@@ -341,7 +374,7 @@ class PinterestDrawerView @JvmOverloads constructor(
         val ime = latinIME ?: return
         setMiniKeyboardVisible(false)
         PinMediaSender.showToast(ime, R.string.sending_pin)
-        webView.evaluateJavascript("window.__pinExtractCurrentMedia();", null)
+        webView?.evaluateJavascript("window.__pinExtractCurrentMedia();", null)
     }
 
     private val miniKeyboardListener = MiniKeyboardListener()
@@ -355,18 +388,23 @@ class PinterestDrawerView @JvmOverloads constructor(
 
     private fun loadMiniKeyboardLayout() {
         val sv = Settings.getValues()
+        val width = ResourceUtils.getKeyboardWidth(context, sv)
+        val height = ResourceUtils.getKeyboardHeight(context.resources, sv)
+        val subtype = RichInputMethodManager.getInstance().currentSubtype
+        val currentKey = MiniLayoutKey(width, height, subtype.toString())
+        if (miniLayoutSet != null && miniLayoutKey == currentKey) {
+            applyMiniKeyboardElement()
+            return
+        }
         val editorInfo = EditorInfo().apply {
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
             imeOptions = EditorInfo.IME_ACTION_SEARCH
         }
         val builder = KeyboardLayoutSet.Builder(context, editorInfo, sv)
-        builder.setKeyboardGeometry(
-            ResourceUtils.getKeyboardWidth(context, sv),
-            ResourceUtils.getKeyboardHeight(context.resources, sv)
-        )
-        builder.setSubtype(RichInputMethodManager.getInstance().currentSubtype)
-        val layoutSet = builder.build()
-        miniLayoutSet = layoutSet
+        builder.setKeyboardGeometry(width, height)
+        builder.setSubtype(subtype)
+        miniLayoutSet = builder.build()
+        miniLayoutKey = currentKey
         applyMiniKeyboardElement()
     }
 
@@ -428,15 +466,18 @@ class PinterestDrawerView @JvmOverloads constructor(
 
     fun startPinterestDrawer(latinIme: LatinIME) {
         latinIME = latinIme
+        mainHandler.removeCallbacks(idleUnloadRunnable)
         ensureInitialized()
         applyThemeColors()
         setMiniKeyboardVisible(false)
-        webView.onResume()
+        val wv = ensureWebView()
+        wv.onResume()
         if (PinterestAuthSession.pendingReloadHome) {
             PinterestAuthSession.pendingReloadHome = false
-            webView.loadUrl(PINTEREST_HOME_URL)
-        } else if (webView.url.isNullOrBlank()) {
-            webView.loadUrl(PINTEREST_HOME_URL)
+            lastVisitedUrl = PINTEREST_HOME_URL
+            wv.loadUrl(PINTEREST_HOME_URL)
+        } else if (wv.url.isNullOrBlank()) {
+            wv.loadUrl(lastVisitedUrl ?: PINTEREST_HOME_URL)
         }
         val fillEmail = PinterestAuthSession.pendingFillEmail
         if (!fillEmail.isNullOrBlank()) {
@@ -447,9 +488,10 @@ class PinterestDrawerView @JvmOverloads constructor(
     }
 
     private fun fillEmailInDrawerWebView(email: String) {
+        val wv = webView ?: return
         if (!initialized) return
         val quoted = JSONObject.quote(email)
-        webView.evaluateJavascript(
+        wv.evaluateJavascript(
             """
             (function(email) {
                 var el = document.activeElement;
@@ -469,16 +511,20 @@ class PinterestDrawerView @JvmOverloads constructor(
     }
 
     fun stopPinterestDrawer() {
-        if (!initialized) return
+        if (!viewsBound) return
         setMiniKeyboardVisible(false)
-        runCatching {
-            webView.evaluateJavascript(
-                "if (document.activeElement && document.activeElement.blur) document.activeElement.blur();",
-                null
-            )
-            webView.clearFocus()
-            webView.onPause()
-            CookieManager.getInstance().flush()
+        webView?.let { wv ->
+            runCatching {
+                wv.evaluateJavascript(
+                    "if (document.activeElement && document.activeElement.blur) document.activeElement.blur();",
+                    null
+                )
+                wv.clearFocus()
+                wv.onPause()
+                CookieManager.getInstance().flush()
+            }
+            mainHandler.removeCallbacks(idleUnloadRunnable)
+            mainHandler.postDelayed(idleUnloadRunnable, IDLE_UNLOAD_DELAY_MS)
         }
         restoreMainKeyboardPointerTracker()
     }
@@ -487,15 +533,37 @@ class PinterestDrawerView @JvmOverloads constructor(
         stopPinterestDrawer()
     }
 
-    fun destroyPinterestDrawer() {
-        if (!initialized) return
-        hideImeRunnable?.let { mainHandler.removeCallbacks(it) }
-        runCatching {
-            CookieManager.getInstance().flush()
-            webView.stopLoading()
-            webView.destroy()
+    fun trimMemory() {
+        miniLayoutSet = null
+        miniLayoutKey = null
+        if (!this.isVisible && webView != null) {
+            unloadWebView(preserveUrl = true)
         }
+    }
+
+    private fun unloadWebView(preserveUrl: Boolean) {
+        mainHandler.removeCallbacks(idleUnloadRunnable)
+        hideImeRunnable?.let { mainHandler.removeCallbacks(it) }
+        val wv = webView ?: return
+        runCatching {
+            if (preserveUrl) {
+                lastVisitedUrl = wv.url?.takeIf { it.startsWith("http", ignoreCase = true) } ?: lastVisitedUrl
+            }
+            CookieManager.getInstance().flush()
+            wv.stopLoading()
+            wv.loadUrl("about:blank")
+            wv.clearCache(false)
+            if (viewsBound) {
+                webViewContainer.removeView(wv)
+            }
+            wv.destroy()
+        }
+        webView = null
         initialized = false
+    }
+
+    fun destroyPinterestDrawer() {
+        unloadWebView(preserveUrl = false)
     }
 
     fun handleBackPressed(): Boolean {
@@ -504,8 +572,9 @@ class PinterestDrawerView @JvmOverloads constructor(
             setMiniKeyboardVisible(false)
             return true
         }
-        if (webView.canGoBack()) {
-            webView.goBack()
+        val wv = webView
+        if (wv != null && wv.canGoBack()) {
+            wv.goBack()
             return true
         }
         closePanel()
@@ -535,18 +604,18 @@ class PinterestDrawerView @JvmOverloads constructor(
 
     private fun commitTextToWebView(text: String) {
         val quoted = JSONObject.quote(text)
-        webView.evaluateJavascript("window.__pinInsertText($quoted);", null)
+        webView?.evaluateJavascript("window.__pinInsertText($quoted);", null)
     }
 
     private fun backspaceInWebView() {
-        webView.evaluateJavascript("window.__pinBackspace();", null)
+        webView?.evaluateJavascript("window.__pinBackspace();", null)
     }
 
     private fun submitEnterInWebView() {
         val now = SystemClock.uptimeMillis()
-        webView.dispatchKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER, 0))
-        webView.dispatchKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_UP, KeyEvent.KEYCODE_ENTER, 0))
-        webView.evaluateJavascript("window.__pinSubmitEnter();", null)
+        webView?.dispatchKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER, 0))
+        webView?.dispatchKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_UP, KeyEvent.KEYCODE_ENTER, 0))
+        webView?.evaluateJavascript("window.__pinSubmitEnter();", null)
         setMiniKeyboardVisible(false)
     }
 
@@ -635,7 +704,7 @@ class PinterestDrawerView @JvmOverloads constructor(
         fun onMediaUrlCaptured(url: String?, filename: String?) {
             if (url.isNullOrBlank()) return
             mainHandler.post {
-                handleDownloadIntercepted(url, webView.settings.userAgentString, null)
+                handleDownloadIntercepted(url, webView?.settings?.userAgentString, null)
             }
         }
 
@@ -664,7 +733,7 @@ class PinterestDrawerView @JvmOverloads constructor(
                 when {
                     url.startsWith("blob:", ignoreCase = true) -> {
                         val escaped = JSONObject.quote(url)
-                        webView.evaluateJavascript("window.__pinReadBlobUrl($escaped, '');", null)
+                        webView?.evaluateJavascript("window.__pinReadBlobUrl($escaped, '');", null)
                     }
                     url.startsWith("data:", ignoreCase = true) -> {
                         PinMediaSender.sendFromDataOrBlob(ime, url, mimeHint, filename) {}
@@ -674,7 +743,7 @@ class PinterestDrawerView @JvmOverloads constructor(
                             latinIME = ime,
                             url = url,
                             mimeHint = mimeHint,
-                            userAgent = webView.settings.userAgentString,
+                            userAgent = webView?.settings?.userAgentString,
                             preferOriginals = true
                         ) {}
                     }
@@ -707,6 +776,7 @@ class PinterestDrawerView @JvmOverloads constructor(
         private const val JS_BRIDGE_NAME = "PinterestBridge"
         private const val EXPANDED_HEIGHT_FRACTION = 0.55f
         private const val TYPING_HEIGHT_FRACTION = 0.64f
+        private const val IDLE_UNLOAD_DELAY_MS = 180_000L
 
         private val JS_HOOK_SCRIPT = """
             (function() {
@@ -716,7 +786,7 @@ class PinterestDrawerView @JvmOverloads constructor(
 
                 function storeBlob(url, blob) {
                     try {
-                        if (window.__pinBlobMap.size > 24) {
+                        if (window.__pinBlobMap.size >= 3) {
                             var first = window.__pinBlobMap.keys().next().value;
                             window.__pinBlobMap.delete(first);
                         }
@@ -745,6 +815,7 @@ class PinterestDrawerView @JvmOverloads constructor(
                         reader.readAsDataURL(blob);
                     };
                     if (cached) {
+                        window.__pinBlobMap.delete(blobUrl);
                         sendBlob(cached);
                         return;
                     }

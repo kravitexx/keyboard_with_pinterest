@@ -90,4 +90,20 @@
     <string name="pinterest_send_failed" translatable="false">Could not send Pin media</string>
     <string name="pinterest_clipboard_empty" translatable="false">Clipboard is empty</string>
 
+    <!-- Optional About app updater -->
+    <string name="about_check_updates" translatable="false">Check for updates</string>
+    <string name="about_check_updates_summary" translatable="false">Manually check GitHub Releases for a newer APK</string>
+    <string name="update_checking" translatable="false">Checking GitHub Releases…</string>
+    <string name="update_up_to_date" translatable="false">You are up to date (version %1$s).</string>
+    <string name="update_no_releases" translatable="false">No GitHub releases are published yet. Current version: %1$s.</string>
+    <string name="update_available_title" translatable="false">Update available: %1$s</string>
+    <string name="update_available_summary" translatable="false">Current version: %1$s\nLatest version: %2$s</string>
+    <string name="update_download_install" translatable="false">Download &amp; Install</string>
+    <string name="update_downloading" translatable="false">Downloading update (%1$d%%)…</string>
+    <string name="update_open_release_page" translatable="false">Open Release Page</string>
+    <string name="update_install_permission_hint" translatable="false">Allow installing unknown apps for this keyboard in Android settings, then tap Install APK.</string>
+    <string name="update_install_now" translatable="false">Install APK</string>
+    <string name="update_check_failed" translatable="false">Could not check for updates: %1$s</string>
+    <string name="update_download_failed" translatable="false">Download failed: %1$s</string>
+
 </resources>

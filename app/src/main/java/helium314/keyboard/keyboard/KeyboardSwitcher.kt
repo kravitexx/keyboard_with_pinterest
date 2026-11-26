@@ -505,6 +505,7 @@ class KeyboardSwitcher private constructor() {
 
     fun trimMemory() {
         emojiPalettes?.clearKeyboardCache()
+        pinterestDrawer?.trimMemory()
     }
 
     fun switchToSubtype(subtype: InputMethodSubtype?) {

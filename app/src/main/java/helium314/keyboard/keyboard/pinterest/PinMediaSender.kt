@@ -20,8 +20,8 @@ import helium314.keyboard.keyboard.KeyboardSwitcher
 import helium314.keyboard.latin.LatinIME
 import helium314.keyboard.latin.R
 import helium314.keyboard.latin.utils.Log
-import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.Locale
@@ -54,12 +54,13 @@ object PinMediaSender {
             try {
                 val cacheDir = prepareAndPruneCacheDir(appContext)
                 val candidates = buildCandidateUrls(url, preferOriginals)
-                var downloaded: DownloadedMedia? = null
+                var downloaded: DownloadedMediaFile? = null
                 for (candidate in candidates) {
-                    downloaded = downloadBytes(candidate, userAgent)
+                    downloaded = downloadToFile(candidate, userAgent, cacheDir)
                     if (downloaded != null) break
                 }
-                if (downloaded == null || downloaded.bytes.isEmpty()) {
+                if (downloaded == null || downloaded.byteCount <= 0L) {
+                    downloaded?.tempFile?.delete()
                     mainHandler.post {
                         showToast(appContext, R.string.pinterest_send_failed)
                         onComplete(false)
@@ -67,11 +68,11 @@ object PinMediaSender {
                     return@execute
                 }
                 val resolvedMime = resolveMimeType(
-                    bytes = downloaded.bytes,
+                    headerBytes = downloaded.headerBytes,
                     headerMime = downloaded.contentType ?: mimeHint,
                     urlOrName = downloaded.finalUrl
                 )
-                val outFile = saveMediaFile(cacheDir, downloaded.bytes, resolvedMime)
+                val outFile = finalizeMediaFile(cacheDir, downloaded.tempFile, resolvedMime)
                 mainHandler.post {
                     val sent = dispatchToActiveEditor(latinIME, outFile, resolvedMime)
                     onComplete(sent)
@@ -157,13 +158,15 @@ object PinMediaSender {
         return if (originalsUrl == clean) listOf(clean) else listOf(originalsUrl, clean)
     }
 
-    private data class DownloadedMedia(
-        val bytes: ByteArray,
+    private data class DownloadedMediaFile(
+        val tempFile: File,
+        val byteCount: Long,
+        val headerBytes: ByteArray,
         val contentType: String?,
         val finalUrl: String
     )
 
-    private fun downloadBytes(urlString: String, userAgent: String?): DownloadedMedia? {
+    private fun downloadToFile(urlString: String, userAgent: String?, cacheDir: File): DownloadedMediaFile? {
         var currentUrl = urlString
         var redirects = 0
         while (redirects < 5) {
@@ -185,6 +188,8 @@ object PinMediaSender {
                     setRequestProperty("Cookie", cookies)
                 }
             }
+            val tempFile = File.createTempFile("pin_dl_", ".tmp", cacheDir)
+            var succeeded = false
             try {
                 val code = conn.responseCode
                 if (code in 300..399) {
@@ -198,27 +203,59 @@ object PinMediaSender {
                     return null
                 }
                 val contentType = conn.contentType?.substringBefore(';')?.trim()
-                val bytes = conn.inputStream.use { input ->
-                    val out = ByteArrayOutputStream()
-                    val buffer = ByteArray(16 * 1024)
-                    var total = 0
-                    while (true) {
-                        val read = input.read(buffer)
-                        if (read <= 0) break
-                        total += read
-                        if (total > MAX_MEDIA_BYTES) {
-                            throw IllegalStateException("Media exceeds max size limit")
+                val header = ByteArray(32)
+                var headerLen = 0
+                var total = 0L
+                conn.inputStream.use { input ->
+                    FileOutputStream(tempFile).use { out ->
+                        val buffer = ByteArray(16 * 1024)
+                        while (true) {
+                            val read = input.read(buffer)
+                            if (read <= 0) break
+                            total += read
+                            if (total > MAX_MEDIA_BYTES) {
+                                throw IllegalStateException("Media exceeds max size limit")
+                            }
+                            if (headerLen < header.size) {
+                                val toCopy = (header.size - headerLen).coerceAtMost(read)
+                                System.arraycopy(buffer, 0, header, headerLen, toCopy)
+                                headerLen += toCopy
+                            }
+                            out.write(buffer, 0, read)
                         }
-                        out.write(buffer, 0, read)
                     }
-                    out.toByteArray()
                 }
-                return DownloadedMedia(bytes, contentType, currentUrl)
+                succeeded = true
+                return DownloadedMediaFile(
+                    tempFile = tempFile,
+                    byteCount = total,
+                    headerBytes = header.copyOf(headerLen),
+                    contentType = contentType,
+                    finalUrl = currentUrl
+                )
             } finally {
+                if (!succeeded) {
+                    runCatching { tempFile.delete() }
+                }
                 conn.disconnect()
             }
         }
         return null
+    }
+
+    private fun finalizeMediaFile(dir: File, tempFile: File, mimeType: String): File {
+        val ext = extensionForMime(mimeType)
+        val finalFile = File(dir, "pin_${System.currentTimeMillis()}.$ext")
+        if (tempFile.renameTo(finalFile)) {
+            return finalFile
+        }
+        tempFile.inputStream().use { input ->
+            FileOutputStream(finalFile).use { output ->
+                input.copyTo(output)
+            }
+        }
+        runCatching { tempFile.delete() }
+        return finalFile
     }
 
     private fun saveMediaFile(dir: File, bytes: ByteArray, mimeType: String): File {
@@ -314,8 +351,8 @@ object PinMediaSender {
         Toast.makeText(context.applicationContext, resId, Toast.LENGTH_SHORT).show()
     }
 
-    private fun resolveMimeType(bytes: ByteArray, headerMime: String?, urlOrName: String): String {
-        detectMimeFromMagicBytes(bytes)?.let { return it }
+    private fun resolveMimeType(headerBytes: ByteArray, headerMime: String?, urlOrName: String): String {
+        detectMimeFromMagicBytes(headerBytes)?.let { return it }
         val normalizedHeader = headerMime?.lowercase(Locale.US)?.substringBefore(';')?.trim()
         if (!normalizedHeader.isNullOrBlank() && normalizedHeader != "application/octet-stream") {
             return normalizedHeader
