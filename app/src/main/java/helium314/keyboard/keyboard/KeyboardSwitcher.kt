@@ -533,16 +533,31 @@ class KeyboardSwitcher private constructor() {
     fun setPinterestDrawer() = state.setLayout(LayoutDirective.Utility.PINTEREST)
 
     fun closePinterestDrawer() {
+        val wasShowing = isShowingPinterestDrawer
+        val mainWasHidden = inputView?.keyboardView?.isGone == true &&
+            !isShowingEmojiPalettes &&
+            !isShowingClipboardHistory &&
+            !Settings.getValues().mHasHardwareKeyboard
         pinterestDrawer?.stopPinterestDrawer()
-        pinterestDrawer?.isGone = true
-        if (keyboardSwitchState == KeyboardSwitchState.PINTEREST) {
+        pinterestDrawer?.clearFocus()
+        if (wasShowing && keyboardLayoutSet != null) {
             resetKeyboardStateToAlphabet()
+        }
+        pinterestDrawer?.isGone = true
+        val iv = inputView
+        if ((wasShowing || mainWasHidden) && iv != null && iv.keyboardView.isGone && !Settings.getValues().mHasHardwareKeyboard) {
+            setMainKeyboardFrame(Settings.getValues(), KeyboardSwitchState.OTHER)
         }
         mainKeyboardView?.let {
             PointerTracker.cancelAllPointerTrackers()
             PointerTracker.switchTo(it)
             it.setKeyboardActionListener(latinIME.mKeyboardActionListener)
             it.keyboard?.let { kb -> it.setKeyboard(kb) }
+        }
+        if (wasShowing || mainWasHidden) {
+            iv?.root?.requestLayout()
+            updateSoftInputWindowLayoutParameters()
+            iv?.root?.post { updateSoftInputWindowLayoutParameters() }
         }
     }
 

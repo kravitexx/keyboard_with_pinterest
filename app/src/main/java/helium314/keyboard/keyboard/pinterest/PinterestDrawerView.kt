@@ -16,6 +16,7 @@ import android.util.AttributeSet
 import android.view.KeyEvent
 import android.view.View
 import android.view.inputmethod.EditorInfo
+import android.webkit.ConsoleMessage
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
@@ -255,6 +256,13 @@ class PinterestDrawerView @JvmOverloads constructor(
                 if (!title.isNullOrBlank()) {
                     titleView.text = title
                 }
+            }
+
+            override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
+                if (consoleMessage != null && consoleMessage.messageLevel() == ConsoleMessage.MessageLevel.ERROR) {
+                    Log.e(TAG, "WebView JS error (${consoleMessage.lineNumber()}): ${consoleMessage.message()}")
+                }
+                return super.onConsoleMessage(consoleMessage)
             }
 
             override fun onCreateWindow(
@@ -767,6 +775,13 @@ class PinterestDrawerView @JvmOverloads constructor(
         }
 
         @JavascriptInterface
+        fun onDebugLog(message: String?) {
+            if (!message.isNullOrBlank()) {
+                Log.d(TAG, "JS: $message")
+            }
+        }
+
+        @JavascriptInterface
         fun onWebInputFocused(focused: Boolean, inputType: String?) {
             mainHandler.post {
                 hideImeRunnable?.let { mainHandler.removeCallbacks(it) }
@@ -795,6 +810,12 @@ class PinterestDrawerView @JvmOverloads constructor(
 
         private val JS_HOOK_SCRIPT = """
             (function() {
+                if (window.__pinEnsureSheetObservers) {
+                    try { window.__pinEnsureSheetObservers(); } catch (e) {}
+                }
+                if (window.__pinTryInjectVideoMenu) {
+                    try { window.__pinTryInjectVideoMenu(); } catch (e) {}
+                }
                 if (window.__pinKeyboardHooked) return;
                 window.__pinKeyboardHooked = true;
                 window.__pinBlobMap = new Map();
@@ -1063,36 +1084,40 @@ class PinterestDrawerView @JvmOverloads constructor(
 
                 function findBestVisibleVideo() {
                     var videos = Array.from(document.querySelectorAll('video'));
+                    if (videos.length === 0) return null;
                     var best = null;
                     var bestScore = -1;
                     var vw = window.innerWidth || 400;
                     var vh = window.innerHeight || 600;
                     videos.forEach(function(v) {
                         var r = v.getBoundingClientRect();
-                        if (r.width < 60 || r.height < 60) return;
-                        if (r.bottom <= 0 || r.top >= vh || r.right <= 0 || r.left >= vw) return;
-                        var area = r.width * r.height;
+                        if (r.width < 40 || r.height < 40) return;
+                        var visH = Math.min(r.bottom, vh) - Math.max(r.top, 0);
+                        var visW = Math.min(r.right, vw) - Math.max(r.left, 0);
                         var bonus = 0;
+                        if (visH > 10 && visW > 10) bonus += 100000;
                         try {
                             if (!v.paused && !v.ended) bonus += 1000000;
                             if (v.closest && v.closest('[data-test-id*="closeup"], [data-test-id*="story-pin"]')) bonus += 500000;
                         } catch (e) {}
-                        if (area + bonus > bestScore) {
-                            bestScore = area + bonus;
+                        var area = r.width * r.height + bonus;
+                        if (area > bestScore) {
+                            bestScore = area;
                             best = v;
                         }
                     });
-                    return best;
+                    return best || videos[0];
                 }
 
-                function collectMp4FromObject(rootObj) {
+                function collectVideoFromObject(rootObj) {
                     if (!rootObj) return '';
                     var seen = new Set();
                     var queue = [{ o: rootObj, d: 0 }];
-                    var bestUrl = '';
-                    var bestScore = -1;
+                    var bestMp4 = '';
+                    var bestMp4Score = -1;
+                    var bestHls = '';
                     var count = 0;
-                    while (queue.length > 0 && count < 120) {
+                    while (queue.length > 0 && count < 150) {
                         var item = queue.shift();
                         var o = item.o;
                         var d = item.d;
@@ -1101,21 +1126,24 @@ class PinterestDrawerView @JvmOverloads constructor(
                         count++;
                         var vl = o.video_list;
                         if (vl && typeof vl === 'object') {
-                            var pref = ['V_EXP7', 'V_720P', 'V_EXP6', 'V_480P', 'V_EXP5', 'V_360P'];
+                            var pref = ['V_EXP7', 'V_720P', 'V_EXP6', 'V_480P', 'V_EXP5', 'V_360P', 'V_HLSV4', 'V_HLSV3_MOBILE', 'V_HLSV3_WEB'];
                             var allKeys = pref.concat(Object.keys(vl));
                             for (var k = 0; k < allKeys.length; k++) {
                                 var entry = vl[allKeys[k]];
                                 var u = entry && entry.url;
-                                if (typeof u === 'string' && u.indexOf('.mp4') >= 0) {
+                                if (typeof u !== 'string') continue;
+                                if (u.indexOf('.mp4') >= 0) {
                                     recordMp4Url(u);
                                     var sc = scoreMp4Quality(u);
-                                    if (sc > bestScore) {
-                                        bestScore = sc;
-                                        bestUrl = u;
+                                    if (sc > bestMp4Score) {
+                                        bestMp4Score = sc;
+                                        bestMp4 = u;
                                     }
+                                } else if (!bestHls && u.indexOf('pinimg.com/videos/') >= 0 && u.indexOf('.m3u8') >= 0) {
+                                    bestHls = u;
                                 }
                             }
-                            if (bestUrl) return bestUrl;
+                            if (bestMp4) return bestMp4;
                         }
                         if (d < 6) {
                             var keys = Array.isArray(o) ? o : Object.keys(o);
@@ -1123,12 +1151,16 @@ class PinterestDrawerView @JvmOverloads constructor(
                             for (var i = 0; i < limit; i++) {
                                 var val = Array.isArray(o) ? o[i] : o[keys[i]];
                                 if (typeof val === 'string') {
-                                    if (val.indexOf('pinimg.com/videos/') >= 0 && val.indexOf('.mp4') >= 0) {
-                                        recordMp4Url(val);
-                                        var vs = scoreMp4Quality(val);
-                                        if (vs > bestScore) {
-                                            bestScore = vs;
-                                            bestUrl = val;
+                                    if (val.indexOf('pinimg.com/videos/') >= 0) {
+                                        if (val.indexOf('.mp4') >= 0) {
+                                            recordMp4Url(val);
+                                            var vs = scoreMp4Quality(val);
+                                            if (vs > bestMp4Score) {
+                                                bestMp4Score = vs;
+                                                bestMp4 = val;
+                                            }
+                                        } else if (!bestHls && val.indexOf('.m3u8') >= 0) {
+                                            bestHls = val;
                                         }
                                     }
                                 } else if (val && typeof val === 'object') {
@@ -1137,65 +1169,87 @@ class PinterestDrawerView @JvmOverloads constructor(
                             }
                         }
                     }
-                    return bestUrl;
+                    return bestMp4 || bestHls;
                 }
 
                 function findVideoInFiber(videoEl) {
                     try {
                         var el = videoEl;
-                        for (var up = 0; up < 16 && el; up++) {
+                        var bestHls = '';
+                        for (var up = 0; up < 3 && el; up++) {
                             var keys = Object.keys(el);
                             for (var i = 0; i < keys.length; i++) {
                                 var key = keys[i];
                                 if (key.indexOf('__reactProps') === 0) {
-                                    var found = collectMp4FromObject(el[key]);
-                                    if (found) return found;
+                                    var found = collectVideoFromObject(el[key]);
+                                    if (found && found.indexOf('.mp4') >= 0) return found;
+                                    if (!bestHls && found && found.indexOf('.m3u8') >= 0) bestHls = found;
                                 }
                                 if (key.indexOf('__reactFiber') === 0 || key.indexOf('__reactInternalInstance') === 0) {
                                     var f = el[key];
-                                    for (var steps = 0; steps < 14 && f; steps++) {
-                                        var pFound = collectMp4FromObject(f.memoizedProps || f.pendingProps);
-                                        if (pFound) return pFound;
+                                    for (var steps = 0; steps < 9 && f; steps++) {
+                                        var p = f.memoizedProps || f.pendingProps;
+                                        if (p && typeof p.src === 'string' && p.src.indexOf('pinimg.com/videos/') >= 0) {
+                                            if (p.src.indexOf('.mp4') >= 0) return p.src;
+                                            if (!bestHls && p.src.indexOf('.m3u8') >= 0) bestHls = p.src;
+                                        }
+                                        if (p && typeof p.hlsUrl === 'string' && p.hlsUrl.indexOf('pinimg.com/videos/') >= 0) {
+                                            if (!bestHls && p.hlsUrl.indexOf('.m3u8') >= 0) bestHls = p.hlsUrl;
+                                        }
+                                        if (!p || (!p.relatedPins && !p.storyPinData)) {
+                                            var pFound = collectVideoFromObject(p);
+                                            if (pFound && pFound.indexOf('.mp4') >= 0) return pFound;
+                                            if (!bestHls && pFound && pFound.indexOf('.m3u8') >= 0) bestHls = pFound;
+                                        }
                                         f = f.return;
                                     }
                                 }
                             }
                             el = el.parentElement;
                         }
+                        if (bestHls) {
+                            var hm = bestHls.match(VIDEO_HASH_RE);
+                            if (hm && window.__pinVideoHashMap.has(hm[1].toLowerCase())) {
+                                return window.__pinVideoHashMap.get(hm[1].toLowerCase());
+                            }
+                            return bestHls;
+                        }
                     } catch (e) {}
                     return '';
                 }
 
                 function findVideoHash(videoEl) {
+                    // 1. Live network performance entries strictly matching pinimg.com/videos/
+                    try {
+                        if (window.performance && performance.getEntriesByType) {
+                            var entries = performance.getEntriesByType('resource');
+                            var fallbackPerfHash = '';
+                            for (var j = entries.length - 1; j >= 0 && j >= entries.length - 100; j--) {
+                                var name = entries[j].name || '';
+                                if (name.indexOf('pinimg.com/videos/') >= 0) {
+                                    var rm = name.match(VIDEO_HASH_RE);
+                                    if (rm) {
+                                        if (name.indexOf('.mp4') >= 0 || name.indexOf('.m3u8') >= 0) {
+                                            return rm[1].toLowerCase();
+                                        }
+                                        if (!fallbackPerfHash) fallbackPerfHash = rm[1].toLowerCase();
+                                    }
+                                }
+                            }
+                            if (fallbackPerfHash) return fallbackPerfHash;
+                        }
+                    } catch (e) {}
+                    // 2. Video element sources & strictly /videos/ thumbnail URLs (never 736x cover images)
                     var srcs = [];
                     if (videoEl) {
-                        if (videoEl.currentSrc) srcs.push(videoEl.currentSrc);
-                        if (videoEl.src) srcs.push(videoEl.src);
-                        if (videoEl.poster) srcs.push(videoEl.poster);
-                        var container = videoEl.parentElement && videoEl.parentElement.parentElement;
-                        if (container) {
-                            var sibImgs = container.querySelectorAll('img');
-                            for (var si = 0; si < sibImgs.length; si++) {
-                                if (sibImgs[si].src) srcs.push(sibImgs[si].src);
-                            }
-                        }
+                        if (videoEl.currentSrc && videoEl.currentSrc.indexOf('pinimg.com/videos/') >= 0) srcs.push(videoEl.currentSrc);
+                        if (videoEl.src && videoEl.src.indexOf('pinimg.com/videos/') >= 0) srcs.push(videoEl.src);
+                        if (videoEl.poster && videoEl.poster.indexOf('/videos/') >= 0) srcs.push(videoEl.poster);
                     }
                     for (var i = 0; i < srcs.length; i++) {
                         var m = srcs[i].match(VIDEO_HASH_RE);
                         if (m) return m[1].toLowerCase();
                     }
-                    try {
-                        if (window.performance && performance.getEntriesByType) {
-                            var entries = performance.getEntriesByType('resource');
-                            for (var j = entries.length - 1; j >= 0 && j >= entries.length - 80; j--) {
-                                var name = entries[j].name || '';
-                                if (name.indexOf('pinimg.com/videos/') >= 0) {
-                                    var rm = name.match(VIDEO_HASH_RE);
-                                    if (rm) return rm[1].toLowerCase();
-                                }
-                            }
-                        }
-                    } catch (e) {}
                     return '';
                 }
 
@@ -1214,99 +1268,289 @@ class PinterestDrawerView @JvmOverloads constructor(
 
                 function scanScriptsForVideo(hash) {
                     var scripts = Array.from(document.querySelectorAll('script[type="application/ld+json"], script#__PWS_DATA__, script[data-relay-response], script'));
+                    var fallbackHls = '';
                     for (var j = 0; j < scripts.length; j++) {
                         var txt = scripts[j].textContent || '';
-                        if (txt.indexOf('pinimg.com/videos/') < 0 || txt.indexOf('.mp4') < 0) continue;
-                        recordVideoText(txt);
+                        if (txt.indexOf('pinimg.com/videos/') < 0) continue;
+                        if (txt.indexOf('.mp4') >= 0) recordVideoText(txt);
                         if (hash && window.__pinVideoHashMap.has(hash)) {
                             return window.__pinVideoHashMap.get(hash);
                         }
-                        if (!hash) {
+                        if (!hash && txt.indexOf('.mp4') >= 0) {
                             var norm = txt.replace(/\\\//g, '/');
                             var m = norm.match(/https:\/\/v\d*\.pinimg\.com\/videos\/[^"'\s\\<>]+\.mp4/);
                             if (m && m[0]) return m[0];
                         }
+                        if (!fallbackHls && txt.indexOf('.m3u8') >= 0) {
+                            var hnorm = txt.replace(/\\\//g, '/');
+                            if (hash && hnorm.indexOf(hash) >= 0) {
+                                fallbackHls = 'https://v1.pinimg.com/videos/iht/hls/' + hash + '.m3u8';
+                            } else if (!hash) {
+                                var hm = hnorm.match(/https:\/\/v\d*\.pinimg\.com\/videos\/[^"'\s\\<>]+\.m3u8/);
+                                if (hm && hm[0]) fallbackHls = hm[0];
+                            }
+                        }
                     }
-                    return hash ? (window.__pinVideoHashMap.get(hash) || '') : '';
+                    if (hash && window.__pinVideoHashMap.has(hash)) return window.__pinVideoHashMap.get(hash);
+                    return fallbackHls;
+                }
+
+                function replaceMenuLabelText(rootEl, newText) {
+                    var walker = document.createTreeWalker(rootEl, NodeFilter.SHOW_TEXT, null);
+                    var node;
+                    var replaced = false;
+                    while ((node = walker.nextNode())) {
+                        if ((node.nodeValue || '').trim().length > 0) {
+                            if (!replaced) {
+                                node.nodeValue = newText;
+                                replaced = true;
+                            } else {
+                                node.nodeValue = '';
+                            }
+                        }
+                    }
+                    if (!replaced) {
+                        rootEl.textContent = newText;
+                    }
+                }
+
+                var lastMenuDbg = '';
+                function dbgMenu(msg) {
+                    if (!msg || msg === lastMenuDbg) return;
+                    lastMenuDbg = msg;
+                    try {
+                        if (window.PinterestBridge && window.PinterestBridge.onDebugLog) {
+                            window.PinterestBridge.onDebugLog(msg);
+                        }
+                    } catch (e) {}
                 }
 
                 // Inject a "Download video" option into Pinterest's ... bottom sheet on video pins
                 function tryInjectVideoMenuOption() {
-                    if (document.getElementById('__pinSendVideoMenuItem')) return;
-                    var bestVideo = findBestVisibleVideo();
-                    if (!bestVideo) return;
+                    var elPrimary = null;
+                    var elSecondary = null;
 
-                    var candidates = Array.from(document.querySelectorAll('[role="dialog"], [role="menu"], [data-test-id*="action-sheet"], [data-test-id*="dropdown"]'));
-                    if (candidates.length === 0) {
-                        var fixedDivs = Array.from(document.querySelectorAll('body > div, div[role="presentation"]'));
-                        candidates = fixedDivs;
-                    }
-
-                    for (var c = candidates.length - 1; c >= 0; c--) {
-                        var sheet = candidates[c];
-                        if (!sheet || !sheet.innerText) continue;
-                        var txt = sheet.innerText;
-                        if (txt.indexOf('Open in app') < 0 && txt.indexOf('Report Pin') < 0 && txt.indexOf('See more') < 0) continue;
-                        if (/download\s*video/i.test(txt)) return; // already has video download option
-
-                        var items = Array.from(sheet.querySelectorAll('a, button, [role="button"], [role="menuitem"]'));
-                        var anchorItem = null;
-                        for (var i = 0; i < items.length; i++) {
-                            var it = items[i];
-                            var t = (it.innerText || it.textContent || '').trim();
-                            if (t === 'Open in app' || t === 'See more' || t === 'Report Pin') {
-                                anchorItem = it;
-                                break;
+                    function findVisibleTestId(tid) {
+                        var nodes = document.querySelectorAll('[data-test-id="' + tid + '"]');
+                        var fallback = null;
+                        for (var ni = nodes.length - 1; ni >= 0; ni--) {
+                            var n = nodes[ni];
+                            if (n.closest && n.closest('[aria-hidden="true"]')) continue;
+                            var r = n.getBoundingClientRect();
+                            var cs = window.getComputedStyle(n);
+                            if (r.width > 0 && r.height > 0 && cs.visibility !== 'hidden' && cs.display !== 'none') {
+                                if (parseFloat(cs.opacity || '1') > 0) return n;
+                                if (!fallback) fallback = n;
                             }
                         }
-                        if (!anchorItem || !anchorItem.parentElement) continue;
+                        return fallback;
+                    }
 
-                        var row = document.createElement('div');
-                        row.id = '__pinSendVideoMenuItem';
-                        row.setAttribute('role', 'button');
-                        row.setAttribute('tabindex', '0');
-                        var cs = window.getComputedStyle(anchorItem);
-                        row.textContent = 'Download video';
-                        row.style.cssText = 'display:flex;align-items:center;width:100%;box-sizing:border-box;cursor:pointer;' +
-                            'font-family:' + cs.fontFamily + ';font-size:' + (cs.fontSize || '16px') + ';' +
-                            'font-weight:' + (cs.fontWeight || '600') + ';color:' + (cs.color || 'inherit') + ';' +
-                            'padding:' + (cs.padding && cs.padding !== '0px' ? cs.padding : '14px 20px') + ';' +
-                            'min-height:' + (cs.minHeight || '44px') + ';';
+                    // Fast exact data-test-id match used by Pinterest mobile context menus
+                    var tidCands = [
+                        findVisibleTestId('more-options-open-app'),
+                        findVisibleTestId('more-options-see-more'),
+                        findVisibleTestId('more-options-hide-pin'),
+                        findVisibleTestId('more-options-report-pin'),
+                        findVisibleTestId('more-options-save'),
+                        findVisibleTestId('more-options-share')
+                    ].filter(function(el) { return !!el; });
+                    if (tidCands.length >= 2) {
+                        elPrimary = tidCands[0];
+                        elSecondary = tidCands[1];
+                    }
 
-                        (function(targetSheet) {
-                            row.addEventListener('click', function(ev) {
-                                ev.preventDefault();
-                                ev.stopPropagation();
-                                try {
-                                    var closeBtn = targetSheet.querySelector('button[aria-label*="Close" i], button[aria-label*="close" i], [data-test-id*="close"] button');
-                                    if (!closeBtn) {
-                                        var btns = targetSheet.querySelectorAll('button');
-                                        for (var bi = 0; bi < btns.length; bi++) {
-                                            if (!(btns[bi].innerText || '').trim()) { closeBtn = btns[bi]; break; }
-                                        }
-                                    }
-                                    if (closeBtn) closeBtn.click();
-                                } catch (err) {}
-                                window.PinterestBridge.onVideoMenuDownloadClicked();
-                            }, true);
-                        })(sheet);
+                    // Fallback visible-label scan (do not filter out items below innerHeight when drawer is short)
+                    if (!elPrimary || !elSecondary) {
+                        var leafMap = {};
+                        var allEls = document.querySelectorAll('div, span, p, a, button, h1, h2, h3, h4, li, [role="button"], [role="menuitem"]');
+                        for (var i = 0; i < allEls.length; i++) {
+                            var el = allEls[i];
+                            if (el.closest && el.closest('[aria-hidden="true"]')) continue;
+                            var hasBlockChild = false;
+                            for (var ci = 0; ci < el.children.length; ci++) {
+                                var ctag = (el.children[ci].tagName || '').toLowerCase();
+                                if (ctag !== 'svg' && ctag !== 'path') {
+                                    hasBlockChild = true;
+                                    break;
+                                }
+                            }
+                            if (hasBlockChild) continue;
+                            var t = (el.textContent || '').trim();
+                            if (t !== 'Open in app' && t !== 'See more' && t !== 'See less' &&
+                                t !== 'Report Pin' && t !== 'Save image' && t !== 'Share' &&
+                                t !== 'Copy link' && t !== 'Hide Pin') {
+                                continue;
+                            }
+                            var r = el.getBoundingClientRect();
+                            var cs = window.getComputedStyle(el);
+                            if (r.width <= 10 || r.height <= 8 || cs.visibility === 'hidden' || cs.display === 'none') continue;
+                            leafMap[t] = el;
+                        }
+                        var labelOrder = ['Open in app', 'Save image', 'See more', 'See less', 'Hide Pin', 'Copy link', 'Report Pin', 'Share'];
+                        var foundLeaves = [];
+                        for (var li = 0; li < labelOrder.length; li++) {
+                            if (leafMap[labelOrder[li]]) foundLeaves.push(leafMap[labelOrder[li]]);
+                        }
+                        if (foundLeaves.length >= 2) {
+                            elPrimary = foundLeaves[0];
+                            elSecondary = foundLeaves[1];
+                        }
+                    }
 
-                        anchorItem.parentElement.insertBefore(row, anchorItem);
+                    if (!elPrimary || !elSecondary) return;
+
+                    // Find the exact common ancestor container holding both visible menu items
+                    var listParent = elPrimary.parentElement;
+                    while (listParent && !listParent.contains(elSecondary)) {
+                        listParent = listParent.parentElement;
+                    }
+                    if (!listParent || listParent === document.body || listParent === document.documentElement) {
+                        dbgMenu('skip_bad_parent url=' + location.pathname);
                         return;
                     }
+
+                    // If this active menu list already has our injected item visible, keep it
+                    var prevItem = document.getElementById('__pinSendVideoMenuItem');
+                    if (prevItem && listParent.contains(prevItem)) {
+                        var pr = prevItem.getBoundingClientRect();
+                        if (pr.width > 0 && pr.height > 0) return;
+                    }
+                    if (/download\s*video/i.test(listParent.innerText || '')) return;
+
+                    if (document.querySelectorAll('video').length === 0) {
+                        dbgMenu('skip_no_video url=' + location.pathname + ' items=' + (listParent.innerText || '').replace(/\s+/g, '|').slice(0, 80));
+                        return;
+                    }
+
+                    if (prevItem && prevItem.parentElement) {
+                        prevItem.parentElement.removeChild(prevItem);
+                    }
+
+                    // Climb from elPrimary and elSecondary to their direct child rows inside listParent
+                    var rowPrimary = elPrimary;
+                    while (rowPrimary.parentElement && rowPrimary.parentElement !== listParent) {
+                        rowPrimary = rowPrimary.parentElement;
+                    }
+                    var rowSecondary = elSecondary;
+                    while (rowSecondary.parentElement && rowSecondary.parentElement !== listParent) {
+                        rowSecondary = rowSecondary.parentElement;
+                    }
+                    if (rowPrimary.parentElement !== listParent || rowPrimary === rowSecondary) {
+                        dbgMenu('skip_same_row url=' + location.pathname);
+                        return;
+                    }
+
+                    var sheetRoot = listParent;
+                    for (var sp = 0; sp < 8 && sheetRoot.parentElement && sheetRoot.parentElement !== document.body; sp++) {
+                        if (sheetRoot.getAttribute && sheetRoot.getAttribute('role') === 'dialog') break;
+                        if (sheetRoot.querySelector && sheetRoot.querySelector('button[aria-label*="Close" i], button svg')) break;
+                        sheetRoot = sheetRoot.parentElement;
+                    }
+
+                    // Clone rowPrimary (typically "Open in app") so height, left alignment, fonts, and margins match 1:1
+                    var desiredGap = 0;
+                    try {
+                        var refNext = rowPrimary.nextElementSibling;
+                        if (refNext) {
+                            desiredGap = Math.round(refNext.getBoundingClientRect().top - rowPrimary.getBoundingClientRect().bottom);
+                        } else {
+                            desiredGap = Math.round(rowSecondary.getBoundingClientRect().top - rowPrimary.getBoundingClientRect().bottom);
+                        }
+                    } catch (e) {}
+
+                    var clone = rowPrimary.cloneNode(true);
+                    clone.id = '__pinSendVideoMenuItem';
+                    if (clone.removeAttribute) clone.removeAttribute('data-test-id');
+                    clone.querySelectorAll('[data-test-id]').forEach(function(n) { n.removeAttribute('data-test-id'); });
+                    clone.querySelectorAll('svg').forEach(function(svg) { svg.remove(); });
+                    replaceMenuLabelText(clone, 'Download video');
+                    clone.style.cursor = 'pointer';
+
+                    var insertBeforeNode = rowPrimary;
+                    if (!insertBeforeNode) return;
+
+                    (function(targetSheet) {
+                        clone.addEventListener('click', function(ev) {
+                            ev.preventDefault();
+                            ev.stopPropagation();
+                            if (ev.stopImmediatePropagation) ev.stopImmediatePropagation();
+                            try {
+                                var closeBtn = targetSheet.querySelector('button[aria-label*="Close" i], button[aria-label*="close" i], [data-test-id*="close"] button');
+                                if (!closeBtn) {
+                                    var btns = targetSheet.querySelectorAll('button');
+                                    for (var bi = 0; bi < btns.length; bi++) {
+                                        if (!(btns[bi].innerText || '').trim()) { closeBtn = btns[bi]; break; }
+                                    }
+                                }
+                                if (closeBtn) closeBtn.click();
+                            } catch (err) {}
+                            window.PinterestBridge.onVideoMenuDownloadClicked();
+                        }, true);
+                    })(sheetRoot);
+
+                    listParent.insertBefore(clone, insertBeforeNode);
+                    try {
+                        if (desiredGap > 4 && desiredGap < 60) {
+                            var actualGap = Math.round(insertBeforeNode.getBoundingClientRect().top - clone.getBoundingClientRect().bottom);
+                            if (actualGap < desiredGap - 2) {
+                                var curMb = parseFloat(window.getComputedStyle(clone).marginBottom || '0') || 0;
+                                clone.style.marginBottom = (curMb + (desiredGap - actualGap)) + 'px';
+                            }
+                        }
+                    } catch (e) {}
+                    dbgMenu('injected url=' + location.pathname + ' gap=' + desiredGap + ' top=' + Math.round(clone.getBoundingClientRect().top));
                 }
 
-                try {
-                    var sheetTimer = null;
-                    var obs = new MutationObserver(function() {
-                        if (sheetTimer) return;
-                        sheetTimer = setTimeout(function() {
-                            sheetTimer = null;
-                            tryInjectVideoMenuOption();
-                        }, 80);
-                    });
-                    obs.observe(document.documentElement, { childList: true, subtree: true });
-                } catch (e) {}
+                window.__pinTryInjectVideoMenu = tryInjectVideoMenuOption;
+
+                var sheetTimer = null;
+                function scheduleSheetInject() {
+                    if (sheetTimer) return;
+                    sheetTimer = setTimeout(function() {
+                        sheetTimer = null;
+                        tryInjectVideoMenuOption();
+                    }, 60);
+                }
+
+                function scheduleBurstInject() {
+                    setTimeout(tryInjectVideoMenuOption, 80);
+                    setTimeout(tryInjectVideoMenuOption, 220);
+                    setTimeout(tryInjectVideoMenuOption, 480);
+                    setTimeout(tryInjectVideoMenuOption, 850);
+                }
+
+                window.__pinEnsureSheetObservers = function() {
+                    try {
+                        var root = document.documentElement || document.body;
+                        if (!root) {
+                            if (!window.__pinDomReadyHooked) {
+                                window.__pinDomReadyHooked = true;
+                                document.addEventListener('DOMContentLoaded', function() {
+                                    window.__pinEnsureSheetObservers();
+                                    tryInjectVideoMenuOption();
+                                }, { once: true });
+                            }
+                            return;
+                        }
+                        if (window.__pinSheetObsAttached) return;
+                        var obs = new MutationObserver(scheduleSheetInject);
+                        obs.observe(root, {
+                            childList: true,
+                            subtree: true,
+                            attributes: true,
+                            attributeFilter: ['style', 'class', 'hidden', 'aria-hidden']
+                        });
+                        document.addEventListener('click', scheduleBurstInject, true);
+                        document.addEventListener('touchend', scheduleBurstInject, true);
+                        window.__pinSheetObsAttached = true;
+                        dbgMenu('observer_attached url=' + location.pathname);
+                    } catch (e) {
+                        dbgMenu('observer_err ' + (e && e.message ? e.message : e));
+                    }
+                };
+                window.__pinEnsureSheetObservers();
+                tryInjectVideoMenuOption();
 
                 window.__pinExtractCurrentMedia = function(videoOnly) {
                     try {
@@ -1337,25 +1581,34 @@ class PinterestDrawerView @JvmOverloads constructor(
                         }
 
                         var hash = findVideoHash(activeVideo || videoList[0]);
+                        var fallbackVideoUrl = hash ? ('https://v1.pinimg.com/videos/iht/hls/' + hash + '.m3u8') : '';
                         if (activeVideo) {
-                            var fiberMp4 = findVideoInFiber(activeVideo);
-                            if (fiberMp4) {
-                                window.PinterestBridge.onExtractedPinMedia(fiberMp4, 'video/mp4', '');
-                                return;
+                            var fiberVid = findVideoInFiber(activeVideo);
+                            if (fiberVid) {
+                                if (fiberVid.indexOf('.mp4') >= 0) {
+                                    window.PinterestBridge.onExtractedPinMedia(fiberVid, 'video/mp4', '');
+                                    return;
+                                }
+                                // Keep exact stream URL/hash bound to this <video> element
+                                var fhm = fiberVid.match(VIDEO_HASH_RE);
+                                if (fhm) hash = fhm[1].toLowerCase();
+                                fallbackVideoUrl = fiberVid;
                             }
                             if (hash && window.__pinVideoHashMap.has(hash)) {
                                 window.PinterestBridge.onExtractedPinMedia(window.__pinVideoHashMap.get(hash), 'video/mp4', '');
                                 return;
                             }
-                            var scriptMp4 = scanScriptsForVideo(hash);
-                            if (scriptMp4 && (hash || location.pathname.indexOf('/pin/') >= 0)) {
-                                window.PinterestBridge.onExtractedPinMedia(scriptMp4, 'video/mp4', '');
-                                return;
+                            if (hash) {
+                                var scriptVid = scanScriptsForVideo(hash);
+                                if (scriptVid && scriptVid.indexOf('.mp4') >= 0) {
+                                    window.PinterestBridge.onExtractedPinMedia(scriptVid, 'video/mp4', '');
+                                    return;
+                                }
                             }
                         } else if (videoOnly || location.pathname.indexOf('/pin/') >= 0) {
-                            var pageMp4 = scanScriptsForVideo(hash);
-                            if (pageMp4) {
-                                window.PinterestBridge.onExtractedPinMedia(pageMp4, 'video/mp4', '');
+                            var pageVid = hash ? scanScriptsForVideo(hash) : '';
+                            if (pageVid && pageVid.indexOf('.mp4') >= 0) {
+                                window.PinterestBridge.onExtractedPinMedia(pageVid, 'video/mp4', '');
                                 return;
                             }
                         }
@@ -1363,7 +1616,6 @@ class PinterestDrawerView @JvmOverloads constructor(
                         // Async resolution via Pinterest's PinResource endpoint & CDN video hash fallback
                         if (activeVideo || videoOnly) {
                             var pinId = extractPinIdForVideo(activeVideo);
-                            var fallbackVideoUrl = hash ? ('https://v1.pinimg.com/videos/iht/hls/' + hash + '.m3u8') : '';
                             if (pinId) {
                                 var payload = encodeURIComponent(JSON.stringify({
                                     options: { field_set_key: 'unauth_react_main_pin', id: pinId }
@@ -1376,11 +1628,13 @@ class PinterestDrawerView @JvmOverloads constructor(
                                     }
                                 }).then(function(r) { return r.json(); }).then(function(data) {
                                     var root = data && data.resource_response && data.resource_response.data;
-                                    var mp4 = collectMp4FromObject(root);
-                                    if (mp4) {
-                                        window.PinterestBridge.onExtractedPinMedia(mp4, 'video/mp4', '');
+                                    var vidUrl = collectVideoFromObject(root);
+                                    if (vidUrl && vidUrl.indexOf('.mp4') >= 0 && (!hash || vidUrl.toLowerCase().indexOf(hash) >= 0)) {
+                                        window.PinterestBridge.onExtractedPinMedia(vidUrl, 'video/mp4', '');
                                     } else if (fallbackVideoUrl) {
                                         window.PinterestBridge.onExtractedPinMedia(fallbackVideoUrl, 'video/mp4', '');
+                                    } else if (vidUrl) {
+                                        window.PinterestBridge.onExtractedPinMedia(vidUrl, 'video/mp4', '');
                                     } else {
                                         window.PinterestBridge.onExtractedPinMedia('pinid://' + pinId, 'video/mp4', '');
                                     }

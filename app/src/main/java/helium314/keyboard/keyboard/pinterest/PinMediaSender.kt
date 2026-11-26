@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 package helium314.keyboard.keyboard.pinterest
 
-import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.ClipDescription
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -175,39 +175,47 @@ object PinMediaSender {
         val lower = clean.lowercase(Locale.US)
         val isVideoPath = lower.contains(".pinimg.com/videos/") || lower.contains(".m3u8") || lower.contains(".mp4")
         if (isVideoHint || isVideoPath) {
-            val candidates = LinkedHashSet<String>()
-            if (lower.substringBefore('?').substringBefore('#').endsWith(".mp4")) {
-                candidates.add(clean)
-            }
-            val hashMatch = VIDEO_HASH_REGEX.find(clean)
-            if (hashMatch != null) {
-                val hash = hashMatch.groupValues[1]
-                val preferMc = lower.contains("/videos/mc/")
-                if (preferMc) {
-                    candidates.add("https://v1.pinimg.com/videos/mc/720p/$hash.mp4")
-                    candidates.add("https://v1.pinimg.com/videos/mc/expMp4/${hash}_720w.mp4")
-                    candidates.add("https://v1.pinimg.com/videos/iht/720p/$hash.mp4")
-                    candidates.add("https://v1.pinimg.com/videos/iht/expMp4/${hash}_720w.mp4")
-                } else {
-                    candidates.add("https://v1.pinimg.com/videos/iht/720p/$hash.mp4")
-                    candidates.add("https://v1.pinimg.com/videos/iht/expMp4/${hash}_720w.mp4")
-                    candidates.add("https://v1.pinimg.com/videos/mc/720p/$hash.mp4")
-                    candidates.add("https://v1.pinimg.com/videos/mc/expMp4/${hash}_720w.mp4")
-                }
-                candidates.add("https://v1.pinimg.com/videos/iht/expMp4/${hash}_540w.mp4")
-                candidates.add("https://v1.pinimg.com/videos/iht/expMp4/${hash}_480w.mp4")
-                candidates.add("https://v1.pinimg.com/videos/iht/expMp4/${hash}_360w.mp4")
-                if (lower.contains("/videos/thumbnails/")) {
-                    candidates.add(clean)
-                }
-            }
-            if (candidates.isNotEmpty()) return candidates.toList()
+            val candidates = expandVideoUrlToCandidates(clean)
+            if (candidates.isNotEmpty()) return candidates
         }
 
         if (!preferOriginals) return listOf(clean)
         val match = PINIMG_SIZE_REGEX.matchEntire(clean) ?: return listOf(clean)
         val originalsUrl = "${match.groupValues[1]}originals${match.groupValues[2]}"
         return if (originalsUrl == clean) listOf(clean) else listOf(originalsUrl, clean)
+    }
+
+    private fun expandVideoUrlToCandidates(cleanUrl: String): List<String> {
+        val clean = cleanUrl.trim()
+        val lower = clean.lowercase(Locale.US)
+        val candidates = LinkedHashSet<String>()
+        if (lower.substringBefore('?').substringBefore('#').endsWith(".mp4")) {
+            candidates.add(clean)
+        }
+        val hashMatch = VIDEO_HASH_REGEX.find(clean)
+        if (hashMatch != null) {
+            val hash = hashMatch.groupValues[1]
+            val preferMc = lower.contains("/videos/mc/")
+            if (preferMc) {
+                candidates.add("https://v1.pinimg.com/videos/mc/720p/$hash.mp4")
+                candidates.add("https://v1.pinimg.com/videos/mc/expMp4/${hash}_720w.mp4")
+                candidates.add("https://v1.pinimg.com/videos/iht/720p/$hash.mp4")
+                candidates.add("https://v1.pinimg.com/videos/iht/expMp4/${hash}_720w.mp4")
+            } else {
+                candidates.add("https://v1.pinimg.com/videos/iht/720p/$hash.mp4")
+                candidates.add("https://v1.pinimg.com/videos/iht/expMp4/${hash}_720w.mp4")
+                candidates.add("https://v1.pinimg.com/videos/mc/720p/$hash.mp4")
+                candidates.add("https://v1.pinimg.com/videos/mc/expMp4/${hash}_720w.mp4")
+            }
+            candidates.add("https://v1.pinimg.com/videos/iht/expMp4/${hash}_540w.mp4")
+            candidates.add("https://v1.pinimg.com/videos/iht/expMp4/v2/${hash}_720w.mp4")
+            candidates.add("https://v1.pinimg.com/videos/iht/expMp4/${hash}_480w.mp4")
+            candidates.add("https://v1.pinimg.com/videos/iht/expMp4/${hash}_360w.mp4")
+            if (lower.contains("/videos/thumbnails/")) {
+                candidates.add(clean)
+            }
+        }
+        return candidates.toList()
     }
 
     private fun resolveVideoUrlsFromPinResource(pinId: String, userAgent: String?): List<String> {
@@ -241,33 +249,48 @@ object PinMediaSender {
                 val text = conn.inputStream.bufferedReader().use { it.readText() }
                 val root = JSONObject(text)
                 val data = root.optJSONObject("resource_response")?.optJSONObject("data") ?: return@runCatching emptyList()
-                val found = mutableListOf<String>()
-                collectVideoUrlsFromJson(data, found)
-                found.distinct()
+                val mp4s = LinkedHashSet<String>()
+                val hls = LinkedHashSet<String>()
+                collectVideoUrlsFromJson(data, mp4s, hls)
+                val all = LinkedHashSet<String>()
+                for (u in mp4s) all.addAll(expandVideoUrlToCandidates(u))
+                for (u in hls) all.addAll(expandVideoUrlToCandidates(u))
+                all.toList()
             } finally {
                 conn.disconnect()
             }
         }.getOrDefault(emptyList())
     }
 
-    private fun collectVideoUrlsFromJson(node: Any?, out: MutableList<String>) {
+    private fun collectVideoUrlsFromJson(
+        node: Any?,
+        mp4Out: MutableSet<String>,
+        hlsOut: MutableSet<String>
+    ) {
         when (node) {
             is JSONObject -> {
                 val vl = node.optJSONObject("video_list")
                 if (vl != null) {
-                    val orderedKeys = listOf("V_EXP7", "V_720P", "V_EXP6", "V_480P", "V_EXP5", "V_360P")
+                    val orderedKeys = listOf(
+                        "V_EXP7", "V_720P", "V_EXP6", "V_480P", "V_EXP5", "V_360P",
+                        "V_HLSV4", "V_HLSV3_MOBILE", "V_HLSV3_WEB"
+                    )
                     for (k in orderedKeys) {
                         val u = vl.optJSONObject(k)?.optString("url")
-                        if (!u.isNullOrBlank() && u.lowercase(Locale.US).contains(".mp4")) {
-                            out.add(u)
+                        if (!u.isNullOrBlank()) {
+                            val lu = u.lowercase(Locale.US)
+                            if (lu.contains(".mp4")) mp4Out.add(u)
+                            else if (lu.contains(".m3u8")) hlsOut.add(u)
                         }
                     }
                     val keys = vl.keys()
                     while (keys.hasNext()) {
                         val k = keys.next()
                         val u = vl.optJSONObject(k)?.optString("url")
-                        if (!u.isNullOrBlank() && u.lowercase(Locale.US).contains(".mp4")) {
-                            out.add(u)
+                        if (!u.isNullOrBlank()) {
+                            val lu = u.lowercase(Locale.US)
+                            if (lu.contains(".mp4")) mp4Out.add(u)
+                            else if (lu.contains(".m3u8")) hlsOut.add(u)
                         }
                     }
                 }
@@ -275,13 +298,13 @@ object PinMediaSender {
                 while (keys.hasNext()) {
                     val k = keys.next()
                     if (k != "video_list") {
-                        collectVideoUrlsFromJson(node.opt(k), out)
+                        collectVideoUrlsFromJson(node.opt(k), mp4Out, hlsOut)
                     }
                 }
             }
             is JSONArray -> {
                 for (i in 0 until node.length()) {
-                    collectVideoUrlsFromJson(node.opt(i), out)
+                    collectVideoUrlsFromJson(node.opt(i), mp4Out, hlsOut)
                 }
             }
         }
@@ -419,6 +442,7 @@ object PinMediaSender {
         val acceptsMime = supportedMimeTypes.any { pattern ->
             ClipDescription.compareMimeTypes(mimeType, pattern)
         }
+        Log.i(TAG, "dispatchToActiveEditor pkg=$targetPackage mime=$mimeType acceptsMime=$acceptsMime supported=${supportedMimeTypes.joinToString()}")
 
         if (acceptsMime && inputConnection != null && editorInfo != null) {
             if (targetPackage != null) {
@@ -453,6 +477,19 @@ object PinMediaSender {
                 setPackage(targetPackage)
             }
         }
+        if (targetPackage != null &&
+            targetPackage.startsWith("com.instagram.") &&
+            mimeType.startsWith("video/", ignoreCase = true)
+        ) {
+            val directComp = ComponentName(
+                targetPackage,
+                "com.instagram.direct.share.handler.DirectExternalMediaShareActivityVideo"
+            )
+            sendIntent.component = directComp
+            if (sendIntent.resolveActivity(context.packageManager) == null) {
+                sendIntent.component = null
+            }
+        }
         if (targetPackage != null) {
             runCatching {
                 context.grantUriPermission(targetPackage, contentUri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
@@ -461,7 +498,18 @@ object PinMediaSender {
         val launched = try {
             context.startActivity(sendIntent)
             true
-        } catch (_: ActivityNotFoundException) {
+        } catch (_: Exception) {
+            if (sendIntent.component != null) {
+                sendIntent.component = null
+                val retried = runCatching {
+                    context.startActivity(sendIntent)
+                    true
+                }.getOrDefault(false)
+                if (retried) {
+                    KeyboardSwitcher.getInstance().closePinterestDrawer()
+                    return true
+                }
+            }
             try {
                 sendIntent.setPackage(null)
                 val chooser = Intent.createChooser(sendIntent, context.getString(R.string.pinterest_send_pin))
@@ -473,10 +521,6 @@ object PinMediaSender {
                 showToast(context, R.string.pinterest_send_failed)
                 false
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "ACTION_SEND failed", e)
-            showToast(context, R.string.pinterest_send_failed)
-            false
         }
         if (launched) {
             KeyboardSwitcher.getInstance().closePinterestDrawer()
