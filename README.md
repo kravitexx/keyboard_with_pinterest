@@ -41,7 +41,7 @@ Requires JDK 17 and the Android SDK (`compileSdk 37`, `minSdk 21`):
 ```
 
 Generated APK path:
-`app/build/outputs/apk/debug/HeliBoard_4.3-beta2-debug.apk`
+`app/build/outputs/apk/debug/HeliBoard_4.3-pin1-debug.apk`
 
 ---
 
