@@ -6,7 +6,16 @@ import android.content.ClipDescription
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.ImageDecoder
+import android.graphics.Paint
+import android.graphics.PorterDuff
+import android.graphics.RectF
 import android.net.Uri
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Base64
@@ -22,6 +31,7 @@ import helium314.keyboard.latin.R
 import helium314.keyboard.latin.utils.Log
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.net.HttpURLConnection
@@ -35,6 +45,9 @@ object PinMediaSender {
     private const val TAG = "PinMediaSender"
     private const val SHARED_PINS_DIR = "shared_pins"
     private const val MAX_MEDIA_BYTES = 50 * 1024 * 1024 // 50 MB guard
+    private const val MIME_WASTICKER = "image/webp.wasticker"
+    private const val STICKER_SIZE_PX = 512
+    private const val MAX_STICKER_BYTES = 98 * 1024
     private val CACHE_MAX_AGE_MS = TimeUnit.HOURS.toMillis(1)
     private val PINIMG_SIZE_REGEX = Regex(
         """^(https?://i\.pinimg\.com/)(?:236x|474x|564x|600x315|736x|1200x)(/.+)$""",
@@ -48,12 +61,19 @@ object PinMediaSender {
     private val executor = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
 
+    fun supportsStickerMime(latinIME: LatinIME?): Boolean {
+        val editorInfo = latinIME?.currentInputEditorInfo ?: return false
+        return EditorInfoCompat.getContentMimeTypes(editorInfo)
+            .any { it.equals(MIME_WASTICKER, ignoreCase = true) }
+    }
+
     fun sendFromUrl(
         latinIME: LatinIME,
         url: String,
         mimeHint: String?,
         userAgent: String?,
         preferOriginals: Boolean,
+        asWhatsAppSticker: Boolean = false,
         onComplete: (Boolean) -> Unit
     ) {
         val appContext = latinIME.applicationContext
@@ -79,9 +99,10 @@ object PinMediaSender {
                     headerMime = downloaded.contentType ?: mimeHint,
                     urlOrName = downloaded.finalUrl
                 )
-                val outFile = finalizeMediaFile(cacheDir, downloaded.tempFile, resolvedMime)
+                val rawFile = finalizeMediaFile(cacheDir, downloaded.tempFile, resolvedMime)
+                val (outFile, outMime) = prepareOutgoingMedia(latinIME, cacheDir, rawFile, resolvedMime, asWhatsAppSticker)
                 mainHandler.post {
-                    val sent = dispatchToActiveEditor(latinIME, outFile, resolvedMime)
+                    val sent = dispatchToActiveEditor(latinIME, outFile, outMime)
                     onComplete(sent)
                 }
             } catch (e: Exception) {
@@ -99,6 +120,7 @@ object PinMediaSender {
         dataUrl: String,
         mimeHint: String?,
         filenameHint: String?,
+        asWhatsAppSticker: Boolean = false,
         onComplete: (Boolean) -> Unit
     ) {
         val appContext = latinIME.applicationContext
@@ -128,9 +150,10 @@ object PinMediaSender {
                     return@execute
                 }
                 val resolvedMime = resolveMimeType(bytes, parsedMime, filenameHint ?: "")
-                val outFile = saveMediaFile(cacheDir, bytes, resolvedMime)
+                val rawFile = saveMediaFile(cacheDir, bytes, resolvedMime)
+                val (outFile, outMime) = prepareOutgoingMedia(latinIME, cacheDir, rawFile, resolvedMime, asWhatsAppSticker)
                 mainHandler.post {
-                    val sent = dispatchToActiveEditor(latinIME, outFile, resolvedMime)
+                    val sent = dispatchToActiveEditor(latinIME, outFile, outMime)
                     onComplete(sent)
                 }
             } catch (e: Exception) {
@@ -141,6 +164,105 @@ object PinMediaSender {
                 }
             }
         }
+    }
+
+    private fun prepareOutgoingMedia(
+        latinIME: LatinIME,
+        cacheDir: File,
+        sourceFile: File,
+        mimeType: String,
+        asWhatsAppSticker: Boolean
+    ): Pair<File, String> {
+        if (!asWhatsAppSticker ||
+            !supportsStickerMime(latinIME) ||
+            !mimeType.startsWith("image/", ignoreCase = true) ||
+            mimeType.equals("image/gif", ignoreCase = true)
+        ) {
+            return sourceFile to mimeType
+        }
+        val stickerFile = encodeToWhatsAppStickerWebp(sourceFile, cacheDir) ?: return sourceFile to mimeType
+        runCatching { sourceFile.delete() }
+        return stickerFile to MIME_WASTICKER
+    }
+
+    private fun encodeToWhatsAppStickerWebp(sourceFile: File, cacheDir: File): File? {
+        val decoded = decodeSampledBitmap(sourceFile, STICKER_SIZE_PX * 2) ?: return null
+        val canvasBitmap = Bitmap.createBitmap(STICKER_SIZE_PX, STICKER_SIZE_PX, Bitmap.Config.ARGB_8888)
+        try {
+            val canvas = Canvas(canvasBitmap)
+            canvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
+            val srcW = decoded.width.coerceAtLeast(1).toFloat()
+            val srcH = decoded.height.coerceAtLeast(1).toFloat()
+            val scale = minOf(STICKER_SIZE_PX / srcW, STICKER_SIZE_PX / srcH)
+            val drawW = srcW * scale
+            val drawH = srcH * scale
+            val left = (STICKER_SIZE_PX - drawW) / 2f
+            val top = (STICKER_SIZE_PX - drawH) / 2f
+            val destRect = RectF(left, top, left + drawW, top + drawH)
+            val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+            canvas.drawBitmap(decoded, null, destRect, paint)
+        } finally {
+            if (!decoded.isRecycled) decoded.recycle()
+        }
+
+        val format = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            Bitmap.CompressFormat.WEBP_LOSSY
+        } else {
+            @Suppress("DEPRECATION")
+            Bitmap.CompressFormat.WEBP
+        }
+        return try {
+            val baos = ByteArrayOutputStream()
+            var chosenBytes: ByteArray? = null
+            for (quality in intArrayOf(92, 80, 68, 55, 42, 30, 18)) {
+                baos.reset()
+                if (!canvasBitmap.compress(format, quality, baos)) {
+                    return null
+                }
+                chosenBytes = baos.toByteArray()
+                if (chosenBytes.size <= MAX_STICKER_BYTES) {
+                    break
+                }
+            }
+            val bytes = chosenBytes ?: return null
+            val outFile = File(cacheDir, "pin_sticker_${System.currentTimeMillis()}.webp")
+            outFile.outputStream().use { it.write(bytes) }
+            Log.i(TAG, "Encoded WhatsApp WebP sticker (${bytes.size} bytes)")
+            outFile
+        } finally {
+            if (!canvasBitmap.isRecycled) canvasBitmap.recycle()
+        }
+    }
+
+    private fun decodeSampledBitmap(file: File, maxDim: Int): Bitmap? {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            return runCatching {
+                val source = ImageDecoder.createSource(file)
+                ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
+                    decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+                    val w = info.size.width
+                    val h = info.size.height
+                    if (w > maxDim || h > maxDim) {
+                        val scale = minOf(maxDim.toFloat() / w, maxDim.toFloat() / h)
+                        decoder.setTargetSize(
+                            (w * scale).toInt().coerceAtLeast(1),
+                            (h * scale).toInt().coerceAtLeast(1)
+                        )
+                    }
+                }
+            }.getOrNull()
+        }
+        val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(file.absolutePath, boundsOpts)
+        var sampleSize = 1
+        while (boundsOpts.outWidth / sampleSize > maxDim * 2 || boundsOpts.outHeight / sampleSize > maxDim * 2) {
+            sampleSize *= 2
+        }
+        val decodeOpts = BitmapFactory.Options().apply {
+            inSampleSize = sampleSize
+            inPreferredConfig = Bitmap.Config.ARGB_8888
+        }
+        return BitmapFactory.decodeFile(file.absolutePath, decodeOpts)
     }
 
     private fun prepareAndPruneCacheDir(context: Context): File {
@@ -468,8 +590,9 @@ object PinMediaSender {
         }
 
         // Fallback: ACTION_SEND targeted to the active app package
+        val fallbackMime = if (mimeType.equals(MIME_WASTICKER, ignoreCase = true)) "image/webp" else mimeType
         val sendIntent = Intent(Intent.ACTION_SEND).apply {
-            type = mimeType
+            type = fallbackMime
             putExtra(Intent.EXTRA_STREAM, contentUri)
             clipData = ClipData.newUri(context.contentResolver, "Pinterest Pin", contentUri)
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION)
@@ -588,7 +711,7 @@ object PinMediaSender {
     private fun extensionForMime(mimeType: String): String = when (mimeType.lowercase(Locale.US)) {
         "image/gif" -> "gif"
         "image/png" -> "png"
-        "image/webp" -> "webp"
+        "image/webp", MIME_WASTICKER -> "webp"
         "video/mp4" -> "mp4"
         "video/webm" -> "webm"
         else -> "jpg"

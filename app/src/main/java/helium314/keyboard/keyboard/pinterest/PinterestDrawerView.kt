@@ -98,6 +98,8 @@ class PinterestDrawerView @JvmOverloads constructor(
 
     private var lastCapturedKey: String? = null
     private var lastCapturedTimeMs: Long = 0L
+    @Volatile
+    private var stickerSupported = false
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
         val settingsValues = Settings.getValues()
@@ -199,6 +201,14 @@ class PinterestDrawerView @JvmOverloads constructor(
         btnSend.setOnClickListener {
             performKeyFeedback(it)
             triggerManualSendCurrentPin()
+        }
+        btnSend.setOnLongClickListener {
+            if (!PinMediaSender.supportsStickerMime(latinIME)) {
+                return@setOnLongClickListener false
+            }
+            performKeyFeedback(it)
+            triggerManualSendAsSticker()
+            true
         }
         btnHeight.setOnClickListener {
             performKeyFeedback(it)
@@ -390,6 +400,13 @@ class PinterestDrawerView @JvmOverloads constructor(
         webView?.evaluateJavascript("window.__pinExtractCurrentMedia();", null)
     }
 
+    private fun triggerManualSendAsSticker() {
+        val ime = latinIME ?: return
+        setMiniKeyboardVisible(false)
+        PinMediaSender.showToast(ime, R.string.sending_pin_sticker)
+        webView?.evaluateJavascript("window.__pinExtractCurrentMedia(false, true);", null)
+    }
+
     private val miniKeyboardListener = MiniKeyboardListener()
 
     private fun setupMiniKeyboard() {
@@ -479,12 +496,14 @@ class PinterestDrawerView @JvmOverloads constructor(
 
     fun startPinterestDrawer(latinIme: LatinIME) {
         latinIME = latinIme
+        stickerSupported = PinMediaSender.supportsStickerMime(latinIme)
         mainHandler.removeCallbacks(idleUnloadRunnable)
         ensureInitialized()
         applyThemeColors()
         setMiniKeyboardVisible(false)
         val wv = ensureWebView()
         wv.onResume()
+        wv.evaluateJavascript("window.__pinTryInjectVideoMenu && window.__pinTryInjectVideoMenu();", null)
         if (PinterestAuthSession.pendingReloadHome) {
             PinterestAuthSession.pendingReloadHome = false
             lastVisitedUrl = PINTEREST_HOME_URL
@@ -723,20 +742,38 @@ class PinterestDrawerView @JvmOverloads constructor(
 
         @JavascriptInterface
         fun onBlobCaptured(dataUrl: String?, mimeType: String?, filename: String?) {
+            handleBlobCaptured(dataUrl, mimeType, filename, asSticker = false)
+        }
+
+        @JavascriptInterface
+        fun onBlobCapturedAsSticker(dataUrl: String?, mimeType: String?, filename: String?) {
+            handleBlobCaptured(dataUrl, mimeType, filename, asSticker = true)
+        }
+
+        private fun handleBlobCaptured(dataUrl: String?, mimeType: String?, filename: String?, asSticker: Boolean) {
             if (dataUrl.isNullOrBlank()) return
-            val dedupeKey = "blob:${dataUrl.length}:${dataUrl.take(48)}"
+            val dedupeKey = "blob:$asSticker:${dataUrl.length}:${dataUrl.take(48)}"
             mainHandler.post {
                 val ime = latinIME ?: return@post
                 if (isDuplicateCapture(dedupeKey)) return@post
                 markCaptured(dedupeKey)
                 setMiniKeyboardVisible(false)
-                PinMediaSender.showToast(ime, R.string.sending_pin)
-                PinMediaSender.sendFromDataOrBlob(ime, dataUrl, mimeType, filename) {}
+                PinMediaSender.showToast(ime, if (asSticker) R.string.sending_pin_sticker else R.string.sending_pin)
+                PinMediaSender.sendFromDataOrBlob(ime, dataUrl, mimeType, filename, asWhatsAppSticker = asSticker) {}
             }
         }
 
         @JavascriptInterface
         fun onExtractedPinMedia(url: String?, mimeHint: String?, filename: String?) {
+            handleExtractedPinMedia(url, mimeHint, filename, asSticker = false)
+        }
+
+        @JavascriptInterface
+        fun onExtractedPinSticker(url: String?, mimeHint: String?, filename: String?) {
+            handleExtractedPinMedia(url, mimeHint, filename, asSticker = true)
+        }
+
+        private fun handleExtractedPinMedia(url: String?, mimeHint: String?, filename: String?, asSticker: Boolean) {
             mainHandler.post {
                 val ime = latinIME ?: return@post
                 if (url.isNullOrBlank()) {
@@ -746,10 +783,11 @@ class PinterestDrawerView @JvmOverloads constructor(
                 when {
                     url.startsWith("blob:", ignoreCase = true) -> {
                         val escaped = JSONObject.quote(url)
-                        webView?.evaluateJavascript("window.__pinReadBlobUrl($escaped, '');", null)
+                        val stickerArg = if (asSticker) "true" else "false"
+                        webView?.evaluateJavascript("window.__pinReadBlobUrl($escaped, '', $stickerArg);", null)
                     }
                     url.startsWith("data:", ignoreCase = true) -> {
-                        PinMediaSender.sendFromDataOrBlob(ime, url, mimeHint, filename) {}
+                        PinMediaSender.sendFromDataOrBlob(ime, url, mimeHint, filename, asWhatsAppSticker = asSticker) {}
                     }
                     else -> {
                         PinMediaSender.sendFromUrl(
@@ -757,7 +795,8 @@ class PinterestDrawerView @JvmOverloads constructor(
                             url = url,
                             mimeHint = mimeHint,
                             userAgent = webView?.settings?.userAgentString,
-                            preferOriginals = true
+                            preferOriginals = true,
+                            asWhatsAppSticker = asSticker
                         ) {}
                     }
                 }
@@ -773,6 +812,16 @@ class PinterestDrawerView @JvmOverloads constructor(
                 webView?.evaluateJavascript("window.__pinExtractCurrentMedia(true);", null)
             }
         }
+
+        @JavascriptInterface
+        fun onStickerMenuClicked() {
+            mainHandler.post {
+                triggerManualSendAsSticker()
+            }
+        }
+
+        @JavascriptInterface
+        fun isStickerSupported(): Boolean = stickerSupported
 
         @JavascriptInterface
         fun onDebugLog(message: String?) {
@@ -921,13 +970,17 @@ class PinterestDrawerView @JvmOverloads constructor(
                     return result;
                 };
 
-                window.__pinReadBlobUrl = function(blobUrl, filename) {
+                window.__pinReadBlobUrl = function(blobUrl, filename, asSticker) {
                     var cached = window.__pinBlobMap.get(blobUrl);
                     var sendBlob = function(blob) {
                         var reader = new FileReader();
                         reader.onloadend = function() {
                             if (reader.result) {
-                                window.PinterestBridge.onBlobCaptured(reader.result, blob.type || '', filename || '');
+                                if (asSticker && window.PinterestBridge.onBlobCapturedAsSticker) {
+                                    window.PinterestBridge.onBlobCapturedAsSticker(reader.result, blob.type || '', filename || '');
+                                } else {
+                                    window.PinterestBridge.onBlobCaptured(reader.result, blob.type || '', filename || '');
+                                }
                             }
                         };
                         reader.readAsDataURL(blob);
@@ -938,7 +991,11 @@ class PinterestDrawerView @JvmOverloads constructor(
                         return;
                     }
                     fetch(blobUrl).then(function(r) { return r.blob(); }).then(sendBlob).catch(function() {
-                        window.PinterestBridge.onExtractedPinMedia('', '', '');
+                        if (asSticker && window.PinterestBridge.onExtractedPinSticker) {
+                            window.PinterestBridge.onExtractedPinSticker('', '', '');
+                        } else {
+                            window.PinterestBridge.onExtractedPinMedia('', '', '');
+                        }
                     });
                 };
 
@@ -1325,7 +1382,56 @@ class PinterestDrawerView @JvmOverloads constructor(
                     } catch (e) {}
                 }
 
-                // Inject a "Download video" option into Pinterest's ... bottom sheet on video pins
+                function removeInjectedItem(itemId) {
+                    var el = document.getElementById(itemId);
+                    if (el && el.parentElement) el.parentElement.removeChild(el);
+                }
+
+                function injectCustomMenuItem(listParent, rowPrimary, sheetRoot, desiredGap, itemId, label, onInvoke) {
+                    var clone = rowPrimary.cloneNode(true);
+                    clone.id = itemId;
+                    if (clone.removeAttribute) clone.removeAttribute('data-test-id');
+                    clone.querySelectorAll('[data-test-id]').forEach(function(n) { n.removeAttribute('data-test-id'); });
+                    clone.querySelectorAll('svg').forEach(function(svg) { svg.remove(); });
+                    replaceMenuLabelText(clone, label);
+                    clone.style.cursor = 'pointer';
+
+                    var insertBeforeNode = rowPrimary;
+                    if (!insertBeforeNode) return null;
+
+                    (function(targetSheet) {
+                        clone.addEventListener('click', function(ev) {
+                            ev.preventDefault();
+                            ev.stopPropagation();
+                            if (ev.stopImmediatePropagation) ev.stopImmediatePropagation();
+                            try {
+                                var closeBtn = targetSheet.querySelector('button[aria-label*="Close" i], button[aria-label*="close" i], [data-test-id*="close"] button');
+                                if (!closeBtn) {
+                                    var btns = targetSheet.querySelectorAll('button');
+                                    for (var bi = 0; bi < btns.length; bi++) {
+                                        if (!(btns[bi].innerText || '').trim()) { closeBtn = btns[bi]; break; }
+                                    }
+                                }
+                                if (closeBtn) closeBtn.click();
+                            } catch (err) {}
+                            onInvoke();
+                        }, true);
+                    })(sheetRoot);
+
+                    listParent.insertBefore(clone, insertBeforeNode);
+                    try {
+                        if (desiredGap > 4 && desiredGap < 60) {
+                            var actualGap = Math.round(insertBeforeNode.getBoundingClientRect().top - clone.getBoundingClientRect().bottom);
+                            if (actualGap < desiredGap - 2) {
+                                var curMb = parseFloat(window.getComputedStyle(clone).marginBottom || '0') || 0;
+                                clone.style.marginBottom = (curMb + (desiredGap - actualGap)) + 'px';
+                            }
+                        }
+                    } catch (e) {}
+                    return clone;
+                }
+
+                // Inject "Download video" on video pins, or "Send as sticker" on image pins when supported (e.g. WhatsApp)
                 function tryInjectVideoMenuOption() {
                     var elPrimary = null;
                     var elSecondary = null;
@@ -1379,7 +1485,7 @@ class PinterestDrawerView @JvmOverloads constructor(
                             var t = (el.textContent || '').trim();
                             if (t !== 'Open in app' && t !== 'See more' && t !== 'See less' &&
                                 t !== 'Report Pin' && t !== 'Save image' && t !== 'Share' &&
-                                t !== 'Copy link' && t !== 'Hide Pin') {
+                                t !== 'Copy link' && t !== 'Hide Pin' && t !== 'Download image') {
                                 continue;
                             }
                             var r = el.getBoundingClientRect();
@@ -1387,7 +1493,7 @@ class PinterestDrawerView @JvmOverloads constructor(
                             if (r.width <= 10 || r.height <= 8 || cs.visibility === 'hidden' || cs.display === 'none') continue;
                             leafMap[t] = el;
                         }
-                        var labelOrder = ['Open in app', 'Save image', 'See more', 'See less', 'Hide Pin', 'Copy link', 'Report Pin', 'Share'];
+                        var labelOrder = ['Open in app', 'Download image', 'Save image', 'See more', 'See less', 'Hide Pin', 'Copy link', 'Report Pin', 'Share'];
                         var foundLeaves = [];
                         for (var li = 0; li < labelOrder.length; li++) {
                             if (leafMap[labelOrder[li]]) foundLeaves.push(leafMap[labelOrder[li]]);
@@ -1410,22 +1516,48 @@ class PinterestDrawerView @JvmOverloads constructor(
                         return;
                     }
 
-                    // If this active menu list already has our injected item visible, keep it
-                    var prevItem = document.getElementById('__pinSendVideoMenuItem');
-                    if (prevItem && listParent.contains(prevItem)) {
-                        var pr = prevItem.getBoundingClientRect();
-                        if (pr.width > 0 && pr.height > 0) return;
-                    }
-                    if (/download\s*video/i.test(listParent.innerText || '')) return;
+                    var hasVideo = document.querySelectorAll('video').length > 0;
+                    var canSticker = !!(window.PinterestBridge && window.PinterestBridge.isStickerSupported && window.PinterestBridge.isStickerSupported());
+                    var listText = listParent.innerText || '';
+                    var hasImageMenuContext = document.querySelectorAll('img').length > 0 || /download\s*image|save\s*image/i.test(listText);
 
-                    if (document.querySelectorAll('video').length === 0) {
-                        dbgMenu('skip_no_video url=' + location.pathname + ' items=' + (listParent.innerText || '').replace(/\s+/g, '|').slice(0, 80));
+                    var modeId = '';
+                    var modeLabel = '';
+                    var modeHandler = null;
+                    if (hasVideo) {
+                        removeInjectedItem('__pinSendStickerMenuItem');
+                        modeId = '__pinSendVideoMenuItem';
+                        modeLabel = 'Download video';
+                        modeHandler = function() { window.PinterestBridge.onVideoMenuDownloadClicked(); };
+                        var prevVid = document.getElementById(modeId);
+                        if (prevVid && listParent.contains(prevVid)) {
+                            var vr = prevVid.getBoundingClientRect();
+                            if (vr.width > 0 && vr.height > 0) return;
+                        }
+                        if (/download\s*video/i.test(listText)) return;
+                    } else if (canSticker && hasImageMenuContext) {
+                        removeInjectedItem('__pinSendVideoMenuItem');
+                        modeId = '__pinSendStickerMenuItem';
+                        modeLabel = 'Send as sticker';
+                        modeHandler = function() {
+                            if (window.PinterestBridge && window.PinterestBridge.onStickerMenuClicked) {
+                                window.PinterestBridge.onStickerMenuClicked();
+                            }
+                        };
+                        var prevStk = document.getElementById(modeId);
+                        if (prevStk && listParent.contains(prevStk)) {
+                            var sr = prevStk.getBoundingClientRect();
+                            if (sr.width > 0 && sr.height > 0) return;
+                        }
+                        if (/send\s*as\s*sticker/i.test(listText)) return;
+                    } else {
+                        removeInjectedItem('__pinSendVideoMenuItem');
+                        removeInjectedItem('__pinSendStickerMenuItem');
+                        dbgMenu('skip_no_video url=' + location.pathname + ' items=' + listText.replace(/\s+/g, '|').slice(0, 80));
                         return;
                     }
 
-                    if (prevItem && prevItem.parentElement) {
-                        prevItem.parentElement.removeChild(prevItem);
-                    }
+                    removeInjectedItem(modeId);
 
                     // Climb from elPrimary and elSecondary to their direct child rows inside listParent
                     var rowPrimary = elPrimary;
@@ -1459,47 +1591,10 @@ class PinterestDrawerView @JvmOverloads constructor(
                         }
                     } catch (e) {}
 
-                    var clone = rowPrimary.cloneNode(true);
-                    clone.id = '__pinSendVideoMenuItem';
-                    if (clone.removeAttribute) clone.removeAttribute('data-test-id');
-                    clone.querySelectorAll('[data-test-id]').forEach(function(n) { n.removeAttribute('data-test-id'); });
-                    clone.querySelectorAll('svg').forEach(function(svg) { svg.remove(); });
-                    replaceMenuLabelText(clone, 'Download video');
-                    clone.style.cursor = 'pointer';
-
-                    var insertBeforeNode = rowPrimary;
-                    if (!insertBeforeNode) return;
-
-                    (function(targetSheet) {
-                        clone.addEventListener('click', function(ev) {
-                            ev.preventDefault();
-                            ev.stopPropagation();
-                            if (ev.stopImmediatePropagation) ev.stopImmediatePropagation();
-                            try {
-                                var closeBtn = targetSheet.querySelector('button[aria-label*="Close" i], button[aria-label*="close" i], [data-test-id*="close"] button');
-                                if (!closeBtn) {
-                                    var btns = targetSheet.querySelectorAll('button');
-                                    for (var bi = 0; bi < btns.length; bi++) {
-                                        if (!(btns[bi].innerText || '').trim()) { closeBtn = btns[bi]; break; }
-                                    }
-                                }
-                                if (closeBtn) closeBtn.click();
-                            } catch (err) {}
-                            window.PinterestBridge.onVideoMenuDownloadClicked();
-                        }, true);
-                    })(sheetRoot);
-
-                    listParent.insertBefore(clone, insertBeforeNode);
-                    try {
-                        if (desiredGap > 4 && desiredGap < 60) {
-                            var actualGap = Math.round(insertBeforeNode.getBoundingClientRect().top - clone.getBoundingClientRect().bottom);
-                            if (actualGap < desiredGap - 2) {
-                                var curMb = parseFloat(window.getComputedStyle(clone).marginBottom || '0') || 0;
-                                clone.style.marginBottom = (curMb + (desiredGap - actualGap)) + 'px';
-                            }
-                        }
-                    } catch (e) {}
-                    dbgMenu('injected url=' + location.pathname + ' gap=' + desiredGap + ' top=' + Math.round(clone.getBoundingClientRect().top));
+                    var injected = injectCustomMenuItem(listParent, rowPrimary, sheetRoot, desiredGap, modeId, modeLabel, modeHandler);
+                    if (injected) {
+                        dbgMenu('injected(' + modeId + ') url=' + location.pathname + ' gap=' + desiredGap + ' top=' + Math.round(injected.getBoundingClientRect().top));
+                    }
                 }
 
                 window.__pinTryInjectVideoMenu = tryInjectVideoMenuOption;
@@ -1552,107 +1647,116 @@ class PinterestDrawerView @JvmOverloads constructor(
                 window.__pinEnsureSheetObservers();
                 tryInjectVideoMenuOption();
 
-                window.__pinExtractCurrentMedia = function(videoOnly) {
+                window.__pinExtractCurrentMedia = function(videoOnly, asSticker) {
+                    function sendExtracted(url, mime, name) {
+                        if (asSticker && window.PinterestBridge && window.PinterestBridge.onExtractedPinSticker) {
+                            window.PinterestBridge.onExtractedPinSticker(url, mime || '', name || '');
+                        } else {
+                            window.PinterestBridge.onExtractedPinMedia(url, mime || '', name || '');
+                        }
+                    }
                     try {
-                        // 1. Check active visible <video> element or explicit video request
-                        var activeVideo = findBestVisibleVideo();
-                        var videoList = activeVideo ? [activeVideo] : Array.from(document.querySelectorAll('video'));
-                        for (var i = 0; i < videoList.length; i++) {
-                            var v = videoList[i];
-                            var vSrc = v.currentSrc || v.src || '';
-                            if (vSrc && vSrc.indexOf('.mp4') >= 0) {
-                                window.PinterestBridge.onExtractedPinMedia(vSrc, 'video/mp4', '');
+                        // 1. Check active visible <video> element or explicit video request (skip when sending image as sticker)
+                        if (!asSticker) {
+                            var activeVideo = findBestVisibleVideo();
+                            var videoList = activeVideo ? [activeVideo] : Array.from(document.querySelectorAll('video'));
+                            for (var i = 0; i < videoList.length; i++) {
+                                var v = videoList[i];
+                                var vSrc = v.currentSrc || v.src || '';
+                                if (vSrc && vSrc.indexOf('.mp4') >= 0) {
+                                    sendExtracted(vSrc, 'video/mp4', '');
+                                    return;
+                                }
+                                var sources = v.querySelectorAll('source');
+                                for (var s = 0; s < sources.length; s++) {
+                                    var sSrc = sources[s].src || '';
+                                    if (sSrc && sSrc.indexOf('.mp4') >= 0) {
+                                        sendExtracted(sSrc, 'video/mp4', '');
+                                        return;
+                                    }
+                                }
+                            }
+
+                            var ogVideo = document.querySelector('meta[property="og:video"], meta[property="og:video:secure_url"]');
+                            if (ogVideo && ogVideo.content && ogVideo.content.indexOf('.mp4') >= 0) {
+                                sendExtracted(ogVideo.content, 'video/mp4', '');
                                 return;
                             }
-                            var sources = v.querySelectorAll('source');
-                            for (var s = 0; s < sources.length; s++) {
-                                var sSrc = sources[s].src || '';
-                                if (sSrc && sSrc.indexOf('.mp4') >= 0) {
-                                    window.PinterestBridge.onExtractedPinMedia(sSrc, 'video/mp4', '');
+
+                            var hash = findVideoHash(activeVideo || videoList[0]);
+                            var fallbackVideoUrl = hash ? ('https://v1.pinimg.com/videos/iht/hls/' + hash + '.m3u8') : '';
+                            if (activeVideo) {
+                                var fiberVid = findVideoInFiber(activeVideo);
+                                if (fiberVid) {
+                                    if (fiberVid.indexOf('.mp4') >= 0) {
+                                        sendExtracted(fiberVid, 'video/mp4', '');
+                                        return;
+                                    }
+                                    // Keep exact stream URL/hash bound to this <video> element
+                                    var fhm = fiberVid.match(VIDEO_HASH_RE);
+                                    if (fhm) hash = fhm[1].toLowerCase();
+                                    fallbackVideoUrl = fiberVid;
+                                }
+                                if (hash && window.__pinVideoHashMap.has(hash)) {
+                                    sendExtracted(window.__pinVideoHashMap.get(hash), 'video/mp4', '');
+                                    return;
+                                }
+                                if (hash) {
+                                    var scriptVid = scanScriptsForVideo(hash);
+                                    if (scriptVid && scriptVid.indexOf('.mp4') >= 0) {
+                                        sendExtracted(scriptVid, 'video/mp4', '');
+                                        return;
+                                    }
+                                }
+                            } else if (videoOnly || location.pathname.indexOf('/pin/') >= 0) {
+                                var pageVid = hash ? scanScriptsForVideo(hash) : '';
+                                if (pageVid && pageVid.indexOf('.mp4') >= 0) {
+                                    sendExtracted(pageVid, 'video/mp4', '');
                                     return;
                                 }
                             }
-                        }
 
-                        var ogVideo = document.querySelector('meta[property="og:video"], meta[property="og:video:secure_url"]');
-                        if (ogVideo && ogVideo.content && ogVideo.content.indexOf('.mp4') >= 0) {
-                            window.PinterestBridge.onExtractedPinMedia(ogVideo.content, 'video/mp4', '');
-                            return;
-                        }
-
-                        var hash = findVideoHash(activeVideo || videoList[0]);
-                        var fallbackVideoUrl = hash ? ('https://v1.pinimg.com/videos/iht/hls/' + hash + '.m3u8') : '';
-                        if (activeVideo) {
-                            var fiberVid = findVideoInFiber(activeVideo);
-                            if (fiberVid) {
-                                if (fiberVid.indexOf('.mp4') >= 0) {
-                                    window.PinterestBridge.onExtractedPinMedia(fiberVid, 'video/mp4', '');
+                            // Async resolution via Pinterest's PinResource endpoint & CDN video hash fallback
+                            if (activeVideo || videoOnly) {
+                                var pinId = extractPinIdForVideo(activeVideo);
+                                if (pinId) {
+                                    var payload = encodeURIComponent(JSON.stringify({
+                                        options: { field_set_key: 'unauth_react_main_pin', id: pinId }
+                                    }));
+                                    fetch('/resource/PinResource/get/?data=' + payload, {
+                                        credentials: 'include',
+                                        headers: {
+                                            'X-Pinterest-PWS-Handler': 'www/[username].js',
+                                            'Accept': 'application/json'
+                                        }
+                                    }).then(function(r) { return r.json(); }).then(function(data) {
+                                        var root = data && data.resource_response && data.resource_response.data;
+                                        var vidUrl = collectVideoFromObject(root);
+                                        if (vidUrl && vidUrl.indexOf('.mp4') >= 0 && (!hash || vidUrl.toLowerCase().indexOf(hash) >= 0)) {
+                                            sendExtracted(vidUrl, 'video/mp4', '');
+                                        } else if (fallbackVideoUrl) {
+                                            sendExtracted(fallbackVideoUrl, 'video/mp4', '');
+                                        } else if (vidUrl) {
+                                            sendExtracted(vidUrl, 'video/mp4', '');
+                                        } else {
+                                            sendExtracted('pinid://' + pinId, 'video/mp4', '');
+                                        }
+                                    }).catch(function() {
+                                        if (fallbackVideoUrl) {
+                                            sendExtracted(fallbackVideoUrl, 'video/mp4', '');
+                                        } else {
+                                            sendExtracted('pinid://' + pinId, 'video/mp4', '');
+                                        }
+                                    });
                                     return;
                                 }
-                                // Keep exact stream URL/hash bound to this <video> element
-                                var fhm = fiberVid.match(VIDEO_HASH_RE);
-                                if (fhm) hash = fhm[1].toLowerCase();
-                                fallbackVideoUrl = fiberVid;
-                            }
-                            if (hash && window.__pinVideoHashMap.has(hash)) {
-                                window.PinterestBridge.onExtractedPinMedia(window.__pinVideoHashMap.get(hash), 'video/mp4', '');
-                                return;
-                            }
-                            if (hash) {
-                                var scriptVid = scanScriptsForVideo(hash);
-                                if (scriptVid && scriptVid.indexOf('.mp4') >= 0) {
-                                    window.PinterestBridge.onExtractedPinMedia(scriptVid, 'video/mp4', '');
+                                if (fallbackVideoUrl) {
+                                    sendExtracted(fallbackVideoUrl, 'video/mp4', '');
                                     return;
                                 }
-                            }
-                        } else if (videoOnly || location.pathname.indexOf('/pin/') >= 0) {
-                            var pageVid = hash ? scanScriptsForVideo(hash) : '';
-                            if (pageVid && pageVid.indexOf('.mp4') >= 0) {
-                                window.PinterestBridge.onExtractedPinMedia(pageVid, 'video/mp4', '');
+                                sendExtracted('', '', '');
                                 return;
                             }
-                        }
-
-                        // Async resolution via Pinterest's PinResource endpoint & CDN video hash fallback
-                        if (activeVideo || videoOnly) {
-                            var pinId = extractPinIdForVideo(activeVideo);
-                            if (pinId) {
-                                var payload = encodeURIComponent(JSON.stringify({
-                                    options: { field_set_key: 'unauth_react_main_pin', id: pinId }
-                                }));
-                                fetch('/resource/PinResource/get/?data=' + payload, {
-                                    credentials: 'include',
-                                    headers: {
-                                        'X-Pinterest-PWS-Handler': 'www/[username].js',
-                                        'Accept': 'application/json'
-                                    }
-                                }).then(function(r) { return r.json(); }).then(function(data) {
-                                    var root = data && data.resource_response && data.resource_response.data;
-                                    var vidUrl = collectVideoFromObject(root);
-                                    if (vidUrl && vidUrl.indexOf('.mp4') >= 0 && (!hash || vidUrl.toLowerCase().indexOf(hash) >= 0)) {
-                                        window.PinterestBridge.onExtractedPinMedia(vidUrl, 'video/mp4', '');
-                                    } else if (fallbackVideoUrl) {
-                                        window.PinterestBridge.onExtractedPinMedia(fallbackVideoUrl, 'video/mp4', '');
-                                    } else if (vidUrl) {
-                                        window.PinterestBridge.onExtractedPinMedia(vidUrl, 'video/mp4', '');
-                                    } else {
-                                        window.PinterestBridge.onExtractedPinMedia('pinid://' + pinId, 'video/mp4', '');
-                                    }
-                                }).catch(function() {
-                                    if (fallbackVideoUrl) {
-                                        window.PinterestBridge.onExtractedPinMedia(fallbackVideoUrl, 'video/mp4', '');
-                                    } else {
-                                        window.PinterestBridge.onExtractedPinMedia('pinid://' + pinId, 'video/mp4', '');
-                                    }
-                                });
-                                return;
-                            }
-                            if (fallbackVideoUrl) {
-                                window.PinterestBridge.onExtractedPinMedia(fallbackVideoUrl, 'video/mp4', '');
-                                return;
-                            }
-                            window.PinterestBridge.onExtractedPinMedia('', '', '');
-                            return;
                         }
 
                         // 2. Hero closeup image selectors or largest visible pinimg image
@@ -1667,7 +1771,7 @@ class PinterestDrawerView @JvmOverloads constructor(
                             if (heroImg) {
                                 var heroUrl = pickBestSrcFromSrcset(heroImg);
                                 if (heroUrl) {
-                                    window.PinterestBridge.onExtractedPinMedia(heroUrl, '', '');
+                                    sendExtracted(heroUrl, '', '');
                                     return;
                                 }
                             }
@@ -1688,15 +1792,15 @@ class PinterestDrawerView @JvmOverloads constructor(
                             }
                         });
                         if (bestImgUrl) {
-                            window.PinterestBridge.onExtractedPinMedia(bestImgUrl, '', '');
+                            sendExtracted(bestImgUrl, '', '');
                             return;
                         }
 
                         var ogImg = document.querySelector('meta[property="og:image"], link[rel="preload"][as="image"]');
                         var fallbackUrl = ogImg ? (ogImg.content || ogImg.href || '') : '';
-                        window.PinterestBridge.onExtractedPinMedia(fallbackUrl, '', '');
+                        sendExtracted(fallbackUrl, '', '');
                     } catch (err) {
-                        window.PinterestBridge.onExtractedPinMedia('', '', '');
+                        sendExtracted('', '', '');
                     }
                 };
             })();

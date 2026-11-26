@@ -86,6 +86,7 @@
     <string name="pinterest_pick_google_account" translatable="false">Choose Google Account</string>
     <string name="pinterest_google_webview_fallback" translatable="false">Google blocks embedded WebView sign-in; select your Google account above and sign in with Pinterest Email/Password (Android Autofill is enabled here).</string>
     <string name="sending_pin" translatable="false">Sending Pin…</string>
+    <string name="sending_pin_sticker" translatable="false">Sending Sticker…</string>
     <string name="pinterest_no_media_found" translatable="false">No Pin image or video found on this page</string>
     <string name="pinterest_send_failed" translatable="false">Could not send Pin media</string>
     <string name="pinterest_clipboard_empty" translatable="false">Clipboard is empty</string>
